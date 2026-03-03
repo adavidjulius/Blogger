@@ -21,23 +21,44 @@ jobs:
         id: cache-ollama
         uses: actions/cache@v3
         with:
-          path: ~/.ollama
+          path: |
+            ~/.ollama
+            /usr/local/bin/ollama
           key: ${{ runner.os }}-ollama
 
-      - name: Install Ollama
+      - name: Install Ollama (if not cached)
         if: steps.cache-ollama.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
-          echo "/usr/local/bin" >> $GITHUB_PATH
+          # The install script places ollama in /usr/local/bin
 
-      - name: Start Ollama
+      - name: Verify Ollama installation
         run: |
-          ollama serve &
+          if [ -f /usr/local/bin/ollama ]; then
+            echo "✅ Ollama found"
+            /usr/local/bin/ollama --version
+          else
+            echo "❌ Ollama not found"
+            exit 1
+          fi
+
+      - name: Start Ollama service
+        run: |
+          /usr/local/bin/ollama serve &
           sleep 10
+          # Wait for Ollama to be ready
+          for i in {1..10}; do
+            if curl -s http://localhost:11434/api/tags > /dev/null; then
+              echo "✅ Ollama is ready"
+              break
+            fi
+            echo "Waiting for Ollama... ($i/10)"
+            sleep 3
+          done
 
       - name: Pull model
         run: |
-          ollama pull phi
+          /usr/local/bin/ollama pull phi
 
       - name: Install Python dependencies
         run: |
