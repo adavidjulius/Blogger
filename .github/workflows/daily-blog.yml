@@ -2,7 +2,9 @@ name: Daily Blog Post to Blogger
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 8 AM UTC daily
+    - cron: '0 8 * * *'   # 8 AM
+    - cron: '0 14 * * *'  # 2 PM  
+    - cron: '0 20 * * *'  # 8 PM
   workflow_dispatch:
 
 jobs:
