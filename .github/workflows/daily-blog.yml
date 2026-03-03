@@ -2,8 +2,8 @@ name: Daily Blog Post to Blogger
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 8 AM UTC every day
-  workflow_dispatch:       # Allow manual trigger
+    - cron: '0 8 * * *'   # 8 AM UTC daily
+  workflow_dispatch:
 
 jobs:
   generate-and-post:
@@ -16,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
           cache: 'pip'
 
       - name: Cache Ollama
@@ -37,7 +37,7 @@ jobs:
       - name: Start Ollama service
         run: |
           /usr/local/bin/ollama serve &
-          sleep 10   # Give it time to start
+          sleep 10
           # Wait for Ollama to be ready
           for i in {1..10}; do
             if curl -s http://localhost:11434/api/tags > /dev/null; then
@@ -48,17 +48,17 @@ jobs:
             sleep 3
           done
 
-      - name: Pull model (tinyllama – fast)
+      - name: Pull Falcon 7B model
         run: |
-          /usr/local/bin/ollama pull tinyllama
-          echo "✅ Model tinyllama pulled"
+          /usr/local/bin/ollama pull falcon:7b
+          echo "✅ Falcon 7B pulled"
 
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
-      - name: Generate and post to Blogger
+      - name: Generate and post to Blogger (3 posts)
         env:
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -68,9 +68,9 @@ jobs:
           mkdir -p .blog-cache _posts
           python scripts/generate_post.py
 
-      - name: Upload post as artifact (backup)
+      - name: Upload all posts as artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: blog-post-${{ github.run_id }}
+          name: blog-posts-${{ github.run_id }}
           path: _posts/*.md
