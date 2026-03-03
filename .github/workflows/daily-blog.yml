@@ -2,9 +2,9 @@ name: Daily Blog Post to Blogger
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 8:00 AM UTC
-    - cron: '0 14 * * *'  # 2:00 PM UTC
-    - cron: '0 20 * * *'  # 8:00 PM UTC
+    - cron: '0 8 * * *'   # 8 AM
+    - cron: '0 14 * * *'  # 2 PM
+    - cron: '0 20 * * *'  # 8 PM
   workflow_dispatch:
 
 jobs:
@@ -39,28 +39,37 @@ jobs:
       - name: Start Ollama service
         run: |
           /usr/local/bin/ollama serve &
-          sleep 15
-          # Wait for Ollama to be ready
-          for i in {1..15}; do
+          sleep 10
+          for i in {1..10}; do
             if curl -s http://localhost:11434/api/tags > /dev/null; then
               echo "✅ Ollama is ready"
               break
             fi
-            echo "Waiting for Ollama... ($i/15)"
+            echo "Waiting for Ollama... ($i/10)"
             sleep 3
           done
 
-      - name: Pull Falcon 7B model
+      - name: Pull Llama 3 (best model)
         run: |
-          /usr/local/bin/ollama pull falcon:7b
-          echo "✅ Falcon 7B pulled"
+          /usr/local/bin/ollama pull llama3:8b
+          echo "✅ Llama 3 pulled"
+
+      - name: Pull Mistral (backup)
+        run: |
+          /usr/local/bin/ollama pull mistral:7b || true
+          echo "✅ Mistral pulled (if available)"
+
+      - name: Pull Falcon (last resort)
+        run: |
+          /usr/local/bin/ollama pull falcon:7b || true
+          echo "✅ Falcon pulled (if needed)"
 
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pillow
+          pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
-      - name: Generate ONE post and publish to Blogger
+      - name: Generate ONE post and publish
         env:
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
