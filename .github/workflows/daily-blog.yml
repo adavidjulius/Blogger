@@ -2,9 +2,9 @@ name: Daily Blog Post to Blogger
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 8 AM
-    - cron: '0 14 * * *'  # 2 PM  
-    - cron: '0 20 * * *'  # 8 PM
+    - cron: '0 8 * * *'   # 8:00 AM UTC
+    - cron: '0 14 * * *'  # 2:00 PM UTC
+    - cron: '0 20 * * *'  # 8:00 PM UTC
   workflow_dispatch:
 
 jobs:
@@ -39,14 +39,14 @@ jobs:
       - name: Start Ollama service
         run: |
           /usr/local/bin/ollama serve &
-          sleep 10
+          sleep 15
           # Wait for Ollama to be ready
-          for i in {1..10}; do
+          for i in {1..15}; do
             if curl -s http://localhost:11434/api/tags > /dev/null; then
               echo "✅ Ollama is ready"
               break
             fi
-            echo "Waiting for Ollama... ($i/10)"
+            echo "Waiting for Ollama... ($i/15)"
             sleep 3
           done
 
@@ -58,9 +58,9 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+          pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pillow
 
-      - name: Generate and post to Blogger (3 posts)
+      - name: Generate ONE post and publish to Blogger
         env:
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -70,9 +70,9 @@ jobs:
           mkdir -p .blog-cache _posts
           python scripts/generate_post.py
 
-      - name: Upload all posts as artifacts
+      - name: Upload post as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: blog-posts-${{ github.run_id }}
+          name: blog-post-${{ github.run_id }}
           path: _posts/*.md
