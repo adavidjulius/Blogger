@@ -21,34 +21,56 @@ jobs:
         id: cache-ollama
         uses: actions/cache@v3
         with:
-          path: ~/.ollama
+          path: |
+            ~/.ollama
+            /usr/local/bin/ollama
           key: ${{ runner.os }}-ollama
 
       - name: Install Ollama
         if: steps.cache-ollama.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
-
-      - name: Start Ollama
+          # Add Ollama to PATH for this session
+          echo "/usr/local/bin" >> $GITHUB_PATH
+          
+      - name: Verify Ollama installation
+        run: |
+          which ollama || echo "Ollama not in PATH"
+          ls -la /usr/local/bin/ || echo "Bin dir empty"
+          
+      - name: Start Ollama service
         run: |
           ollama serve &
-          sleep 5
+          sleep 10
+          # Test if Ollama is running
+          curl -s http://localhost:11434/api/tags || echo "Ollama not ready yet"
 
       - name: Pull model
         run: |
-          ollama pull phi
+          ollama pull phi || echo "Pull failed, retrying..."
+          sleep 5
+          ollama list
 
       - name: Install Python deps
         run: |
-          pip install feedparser requests beautifulsoup4
+          pip install feedparser requests beautifulsoup4 google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
-      - name: Generate and Save Post
+      - name: Generate and Post to Blogger
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
         run: |
-          mkdir -p .blog-cache
+          mkdir -p .blog-cache _posts
           python scripts/generate_post.py
 
-      - name: Upload Post as Artifact
+      - name: Upload Post as Artifact (backup)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: blog-post-${{ github.run_id }}
-          path: .blog-cache/post_*.html
+          path: |
+            .blog-cache/*.pkl
+            _posts/*.md
