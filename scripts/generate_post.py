@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster with Falcon 7B – 3 posts per day.
-- Primary model: Falcon 7B (via Ollama, no API cost)
-- Fallback model: phi (smaller, faster)
-- Includes Pollinations.ai images with fallback
-- Saves local .md backups for every post
-- Continues even if one post fails
+Blogger Auto-Poster with Falcon 7B – 1 post per run (3x daily)
+- Fixed: Increased Falcon timeout to 600 seconds
+- Fixed: Multiple image fallback methods
 """
 
 import os
@@ -17,6 +14,7 @@ import subprocess
 import traceback
 import urllib.parse
 import time
+import base64
 from datetime import datetime
 from pathlib import Path
 
@@ -34,9 +32,9 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 
 # ==================== CONFIG ====================
-PRIMARY_MODEL = "falcon:7b"       # Main model
-FALLBACK_MODEL = "phi3"             # Backup model (smaller, faster)
-NUM_POSTS_PER_DAY = 3               # Three posts daily
+PRIMARY_MODEL = "falcon:7b"
+FALLBACK_MODEL = "phi"
+NUM_POSTS_PER_DAY = 1  # Changed to 1 (runs 3 times daily)
 
 # ==================== SETUP ====================
 CACHE_DIR = Path(".blog-cache")
@@ -53,36 +51,77 @@ def log_error(step, error, details=None):
         print(f"   Details: {details}")
     print(f"   Traceback: {traceback.format_exc()}")
 
-# ==================== POLLINATIONS.AI IMAGE ====================
-def get_pollinations_image(topic_title, width=1024, height=576):
+# ==================== MULTIPLE IMAGE SOURCES (FALLBACKS) ====================
+def get_unsplash_image(topic_title):
+    """Method 1: Unsplash random image (no API key needed for small usage)"""
     try:
-        prompt = f"Professional blog header image about {topic_title}, high quality, 4k, photorealistic"
+        # Extract keywords (first 3 meaningful words)
+        words = topic_title.split()[:3]
+        keywords = ','.join(words)
+        response = requests.get(
+            f"https://source.unsplash.com/featured/800x400/?{keywords}",
+            timeout=10,
+            allow_redirects=False
+        )
+        if response.status_code == 302 and 'location' in response.headers:
+            return response.headers['location']
+    except:
+        pass
+    return None
+
+def get_pollinations_image(topic_title):
+    """Method 2: Pollinations.ai (free, no key needed) - FIXED URL"""
+    try:
+        prompt = f"Professional blog header image about {topic_title}, high quality, 4k"
         encoded = urllib.parse.quote(prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&seed={random.randint(1,10000)}&nologo=true"
-        return image_url
-    except Exception as e:
-        log_error("Image Generation", str(e))
+        # Using the correct endpoint
+        return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=576&nologo=true"
+    except:
         return None
 
+def get_placeholder_image(topic_title):
+    """Method 3: Generate a simple colored div with text (always works)"""
+    colors = ['#667eea', '#764ba2', '#ff6b6b', '#4ecdc4', '#45b7d1']
+    color = random.choice(colors)
+    return f"PLACEHOLDER:{color}:{topic_title}"
+
 def create_image_html(title):
-    url = get_pollinations_image(title)
-    if url:
+    """Try multiple image sources in sequence"""
+    
+    # Try Unsplash first (most reliable for actual photos)
+    unsplash_url = get_unsplash_image(title)
+    if unsplash_url:
         return f'''
         <div style="margin-bottom:30px; text-align:center;">
-            <img src="{url}" alt="{title}"
-                 style="width:100%; max-width:800px; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);"
+            <img src="{unsplash_url}" alt="{title}"
+                 style="width:100%; max-width:800px; height:400px; object-fit:cover; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+            <p style="color:#777; font-size:0.8em;">📸 Photo from Unsplash</p>
+        </div>
+        '''
+    
+    # Try Pollinations next
+    pollinations_url = get_pollinations_image(title)
+    if pollinations_url:
+        return f'''
+        <div style="margin-bottom:30px; text-align:center;">
+            <img src="{pollinations_url}" alt="{title}"
+                 style="width:100%; max-width:800px; height:400px; object-fit:cover; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);"
                  onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
-            <div style="display:none; background:#f0f0f0; padding:40px; border-radius:12px; color:#666;">
-                🖼️ Image could not be loaded – AI description: {title}
+            <div style="display:none; padding:20px; background:#f0f0f0; border-radius:12px;">
+                <p>Image could not be loaded. Title: {title}</p>
             </div>
             <p style="color:#777; font-size:0.8em;">🎨 AI-generated by Pollinations.ai</p>
         </div>
         '''
-    # Fallback gradient banner
+    
+    # Ultimate fallback - colored banner with emoji
+    colors = ['#667eea', '#764ba2', '#ff6b6b', '#4ecdc4', '#45b7d1']
+    color = random.choice(colors)
     return f'''
-    <div style="margin-bottom:30px; text-align:center; background:linear-gradient(135deg,#667eea,#764ba2); padding:40px; border-radius:12px; color:white;">
-        <h3>{title}</h3>
-        <p>Featured Image</p>
+    <div style="margin-bottom:30px; text-align:center; background:{color}; padding:40px; border-radius:12px; color:white;">
+        <span style="font-size:48px; display:block; margin-bottom:20px;">📰</span>
+        <h3 style="margin:0; color:white;">{title}</h3>
+        <p style="margin:10px 0 0; opacity:0.9;">Today's Featured Article</p>
     </div>
     '''
 
@@ -120,8 +159,10 @@ def post_to_blogger(title, content, labels=None):
     service = get_blogger_service()
     if not service:
         return False, "Auth failed"
+    
     image_html = create_image_html(title)
     full_content = image_html + content.replace('\n', '<br>')
+    
     post_body = {
         "kind": "blogger#post",
         "title": title,
@@ -129,11 +170,12 @@ def post_to_blogger(title, content, labels=None):
         <div style="font-family:Arial,sans-serif; line-height:1.8; max-width:800px; margin:0 auto;">
             {full_content}
             <hr>
-            <p style="color:#666; font-style:italic;">Auto-generated on {datetime.now().strftime('%B %d, %Y')}</p>
+            <p style="color:#666; font-style:italic;">Auto-generated on {datetime.now().strftime('%B %d, %Y at %H:%M UTC')}</p>
         </div>
         """,
         "labels": labels
     }
+    
     try:
         response = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body).execute()
         print(f"✅ Post published: {response.get('url')}")
@@ -149,8 +191,8 @@ def post_to_blogger(title, content, labels=None):
         return False, str(e)
 
 # ==================== FETCH TRENDING TOPICS ====================
-def get_trending_topics(limit=15):
-    """Fetch many topics to have enough for multiple posts."""
+def get_trending_topics():
+    """Fetch topics from RSS feeds."""
     topics = []
     sources = [
         ('https://news.ycombinator.com/rss', 'Hacker News', 5),
@@ -171,50 +213,89 @@ def get_trending_topics(limit=15):
                     })
         except Exception as e:
             log_error(f"RSS {name}", str(e))
+    
     if not topics:
         # Fallback topics
         topics = [
-            {'title': 'The Future of AI', 'description': 'How AI is transforming lives', 'source': 'Tech'},
-            {'title': 'Climate Tech Innovations', 'description': 'Green energy breakthroughs', 'source': 'Science'},
-            {'title': 'Space Exploration 2026', 'description': 'New missions to Moon and Mars', 'source': 'Space'},
-            {'title': 'Digital Privacy', 'description': 'Protecting your data online', 'source': 'Security'},
-            {'title': 'Remote Work Evolution', 'description': 'How work has changed', 'source': 'Business'}
+            {'title': 'The Future of Artificial Intelligence', 'description': 'How AI is transforming our daily lives', 'source': 'Tech'},
+            {'title': 'Climate Change Solutions', 'description': 'New innovations in green technology', 'source': 'Science'},
+            {'title': 'Space Exploration Updates', 'description': 'Latest missions to Mars and beyond', 'source': 'Space'},
+            {'title': 'Digital Privacy Tips', 'description': 'How to protect your data online', 'source': 'Security'},
+            {'title': 'The Remote Work Revolution', 'description': 'How work has changed forever', 'source': 'Business'}
         ]
     random.shuffle(topics)
     return topics
 
-# ==================== GENERATE WITH OLLAMA (FALCON 7B + FALLBACK) ====================
+# ==================== GENERATE WITH OLLAMA (INCREASED TIMEOUT) ====================
 def generate_with_ollama(prompt, model=PRIMARY_MODEL):
-    """Generate text using Ollama; falls back to phi if primary fails."""
-    # Try API with primary model
+    """Generate text using Ollama with 600 second timeout."""
+    
+    # Try API with increased timeout
     try:
+        print(f"⏳ Generating with {model} (timeout: 600s)...")
         resp = requests.post('http://localhost:11434/api/generate',
-                              json={"model": model, "prompt": prompt, "stream": False,
-                                    "options": {"temperature": 0.7, "num_predict": 800}},
-                              timeout=300)
+                              json={
+                                  "model": model, 
+                                  "prompt": prompt, 
+                                  "stream": False,
+                                  "options": {
+                                      "temperature": 0.7, 
+                                      "num_predict": 1000,
+                                      "top_k": 40,
+                                      "top_p": 0.9
+                                  }
+                              },
+                              timeout=600)  # Increased to 600 seconds (10 minutes)
+        
         if resp.status_code == 200:
             content = resp.json().get('response', '').strip()
             if content:
+                print(f"✅ Generation successful ({len(content)} chars)")
                 return content
+    except requests.exceptions.Timeout:
+        print(f"⏰ {model} API timeout after 600 seconds")
     except Exception as e:
         print(f"⚠️ {model} API error: {e}")
 
-    # Fallback to CLI with primary model
+    # Fallback to CLI with increased timeout
     try:
-        result = subprocess.run(['/usr/local/bin/ollama', 'run', model, prompt],
-                                capture_output=True, text=True, timeout=300)
+        print(f"🔄 Falling back to CLI with {model}...")
+        result = subprocess.run(
+            ['/usr/local/bin/ollama', 'run', model, prompt],
+            capture_output=True, 
+            text=True, 
+            timeout=600  # 10 minutes
+        )
         if result.returncode == 0:
-            return result.stdout.strip()
+            content = result.stdout.strip()
+            if content:
+                print(f"✅ CLI generation successful ({len(content)} chars)")
+                return content
+    except subprocess.TimeoutExpired:
+        print(f"⏰ {model} CLI timeout after 600 seconds")
     except Exception as e:
         print(f"⚠️ {model} CLI error: {e}")
 
-    # If primary fails, try fallback model (phi)
+    # If primary fails, try fallback model
     if model != FALLBACK_MODEL:
         print(f"🔄 Falling back to {FALLBACK_MODEL}...")
         return generate_with_ollama(prompt, model=FALLBACK_MODEL)
 
     # Ultimate fallback content
-    return f"<p>Today we're discussing {prompt[:50]}... This topic is worth exploring.</p>"
+    print("⚠️ Using emergency fallback content")
+    return f"""
+    <h2>Introduction</h2>
+    <p>Today we're discussing an important topic: {prompt[:100]}...</p>
+    
+    <h2>Key Points</h2>
+    <p>This topic has been generating significant discussion recently. Experts suggest that developments in this area will continue to evolve throughout 2026.</p>
+    
+    <h2>Why It Matters</h2>
+    <p>Staying informed about current trends helps us understand the world around us and make better decisions.</p>
+    
+    <h2>Conclusion</h2>
+    <p>Thank you for reading this automated post. We'll continue to monitor and report on important developments.</p>
+    """
 
 def generate_blog_post(topic):
     """Generate a blog post for a given topic."""
@@ -224,27 +305,33 @@ TITLE: {topic['title']}
 DESCRIPTION: {topic['description']}
 SOURCE: {topic['source']}
 
-Write 300-400 words with an introduction, 2-3 informative paragraphs, and a strong conclusion.
-Make it professional and interesting. Use proper paragraphs.
+Write 400-500 words with:
+- An attention-grabbing introduction
+- 3-4 informative paragraphs with specific details
+- A strong conclusion that summarizes key points
+
+Make it professional, interesting, and well-structured. Use proper paragraphs.
+
+Blog Post:
 """
     return generate_with_ollama(prompt)
 
 # ==================== LOCAL BACKUP ====================
-def save_local_post(title, content, index):
-    """Save a local copy, index indicates post number."""
+def save_local_post(title, content):
+    """Save a local copy of the post."""
     slug = title.lower().replace(' ', '-')[:50]
     slug = ''.join(c for c in slug if c.isalnum() or c == '-')
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = POSTS_DIR / f"{timestamp}_post{index}_{slug}.md"
+    filename = POSTS_DIR / f"{timestamp}_{slug}.md"
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(f"# {title}\n\n{content}")
     print(f"💾 Local backup saved: {filename}")
     return filename
 
-# ==================== MAIN (3 POSTS) ====================
+# ==================== MAIN ====================
 def main():
     print("="*60)
-    print("🚀 AI BLOGGER – Falcon 7B (3 posts per day)")
+    print("🚀 AI BLOGGER – Falcon 7B (1 post per run)")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*60)
 
@@ -259,68 +346,41 @@ def main():
         sys.exit(1)
     print("✅ All credentials present.")
 
-    # Fetch topics
-    topics = get_trending_topics(limit=20)
-    if len(topics) < NUM_POSTS_PER_DAY:
-        print(f"⚠️ Only {len(topics)} topics available, may reuse.")
-    random.shuffle(topics)
+    # Get topics
+    topics = get_trending_topics()
+    if not topics:
+        print("❌ No topics available.")
+        sys.exit(1)
 
-    successful_posts = 0
-    used_titles = set()
+    # Pick one random topic
+    topic = random.choice(topics)
+    print(f"\n🎯 Selected: {topic['title']} (from {topic['source']})")
 
-    for i in range(NUM_POSTS_PER_DAY):
-        print(f"\n{'='*40}")
-        print(f"📝 Generating Post {i+1} of {NUM_POSTS_PER_DAY}")
-        print(f"{'='*40}")
+    # Generate content
+    print("\n✍️ Generating blog post with Falcon 7B (this may take 3-5 minutes)...")
+    content = generate_blog_post(topic)
+    
+    # Save backup
+    local_file = save_local_post(topic['title'], content)
 
-        # Select a unique topic if possible
-        topic = None
-        for t in topics:
-            if t['title'] not in used_titles:
-                topic = t
-                used_titles.add(t['title'])
-                break
-        if not topic:
-            topic = topics[i % len(topics)]
-            print("⚠️ Reusing a topic (ran out of unique ones).")
-
-        print(f"🎯 Topic: {topic['title']} (from {topic['source']})")
-
-        # Generate content
-        print("✍️ Generating with Falcon 7B...")
-        content = generate_blog_post(topic)
-        print(f"✅ Content generated ({len(content)} chars)")
-
-        # Save backup
-        local_file = save_local_post(topic['title'], content, i+1)
-
-        # Post to Blogger
-        print("📤 Posting to Blogger...")
-        success, result = post_to_blogger(
-            topic['title'],
-            content,
-            labels=['AI Generated', topic['source'].replace(' ', '-'), 'Falcon7B', f'Post{i+1}']
-        )
-
-        if success:
-            successful_posts += 1
-            print(f"✅ Post {i+1} published: {result}")
-        else:
-            print(f"❌ Post {i+1} failed: {result}")
-            print(f"   Backup saved at {local_file}")
-
-        # Brief pause
-        time.sleep(2)
+    # Post to Blogger
+    print("\n📤 Posting to Blogger with image...")
+    success, result = post_to_blogger(
+        topic['title'],
+        content,
+        labels=['AI Generated', topic['source'].replace(' ', '-'), 'Falcon7B']
+    )
 
     # Summary
     print("\n" + "="*60)
-    print(f"📊 SUMMARY: {successful_posts}/{NUM_POSTS_PER_DAY} posts succeeded.")
-    if successful_posts == NUM_POSTS_PER_DAY:
-        print("✨✨✨ All posts published successfully!")
-    elif successful_posts > 0:
-        print("⚠️ Partial success – some posts failed but backups saved.")
+    if success:
+        print("✨ SUCCESS! Blog post published.")
+        print(f"📌 URL: {result}")
+        print(f"📁 Backup: {local_file}")
     else:
-        print("❌ All posts failed. Check logs above.")
+        print("⚠️ Blogger posting failed, but backup saved.")
+        print(f"📁 Backup: {local_file}")
+        print(f"🔍 Error: {result}")
     print("="*60)
 
 if __name__ == "__main__":
