@@ -1,0 +1,75 @@
+name: Daily Blog Post
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # 8 AM UTC daily
+  workflow_dispatch:
+
+jobs:
+  generate-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Cache Ollama
+        id: cache-ollama
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.ollama
+            /usr/local/bin/ollama
+          key: ${{ runner.os }}-ollama-${{ hashFiles('**/ollama-version.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ollama-
+
+      - name: Install Ollama (if not cached)
+        if: steps.cache-ollama.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          echo "ollama-$(ollama --version)" > ollama-version.txt
+
+      - name: Start Ollama service
+        run: |
+          ollama serve &
+          sleep 5
+
+      - name: Cache LLM Model
+        id: cache-model
+        uses: actions/cache@v3
+        with:
+          path: ~/.ollama/models
+          key: ${{ runner.os }}-ollama-model-phi
+          restore-keys: |
+            ${{ runner.os }}-ollama-model-
+
+      - name: Pull LLM model (if not cached)
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          ollama pull phi
+
+      - name: Install Python dependencies
+        run: |
+          pip install feedparser requests beautifulsoup4
+
+      - name: Generate blog post
+        env:
+          PYTHONUNBUFFERED: 1
+        run: |
+          mkdir -p .blog-cache
+          chmod +x scripts/generate_post.py
+          python scripts/generate_post.py
+
+      - name: Commit and push
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add _posts/ .blog-cache/
+          git diff --quiet && git diff --staged --quiet || git commit -m "Auto-generated blog post for $(date +'%Y-%m-%d')"
+          git push
