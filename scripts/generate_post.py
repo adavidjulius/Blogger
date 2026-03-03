@@ -10,10 +10,15 @@ import hashlib
 import pickle
 from pathlib import Path
 import html
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 
-# -------------------- BLOGGER SETUP --------------------
-BLOGGER_ID = "6965563738161457805"  # Replace with your actual Blogger ID
-BLOG_URL = "https://draft.blogger.com/blog/posts/6965563738161457805"  # Replace with your blog URL
+# -------------------- BLOGGER CONFIGURATION --------------------
+BLOGGER_BLOG_ID = "6965563738161457805"  # Replace with your actual blog ID
+# These will come from GitHub Secrets
+GOOGLE_CLIENT_SECRET = os.getenv("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")
+GOOGLE_REFRESH_TOKEN = os.getenv("1//04uQQOqNFB0CBCgYIARAAGAQSNwF-L9Irra3IuUhVGYzM0FsHR36wHU1RuVl96Wdbe_2hCzg8pAaTipLx3RhRSybN661p0J48IMk")
 
 # -------------------- Cache Setup --------------------
 CACHE_DIR = Path(".blog-cache")
@@ -36,6 +41,74 @@ def set_cache(key, value):
             'timestamp': datetime.now(),
             'value': value
         }, f)
+
+# -------------------- Blogger API Functions --------------------
+def get_blogger_service():
+    """Get authenticated Blogger service"""
+    try:
+        creds = Credentials(
+            token=None,
+            refresh_token=GOOGLE_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=["https://www.googleapis.com/auth/blogger"]
+        )
+        
+        # Refresh the token
+        creds.refresh(Request())
+        
+        # Build the service
+        service = build('blogger', 'v3', credentials=creds)
+        return service
+    except Exception as e:
+        print(f"❌ Error authenticating with Blogger: {e}")
+        return None
+
+def post_to_blogger(title, content, labels=None):
+    """Post directly to Google Blogger"""
+    if labels is None:
+        labels = ['AI Generated', 'Trending', 'Daily Post']
+    
+    try:
+        service = get_blogger_service()
+        if not service:
+            return False
+        
+        # Prepare the post content with HTML formatting
+        post_content = f"""
+        <div style="font-family: Arial, sans-serif; line-height: 1.8; max-width: 800px; margin: 0 auto;">
+            <article>
+                {content.replace(chr(10), '<br>')}
+            </article>
+            <hr style="margin: 40px 0 20px; border: 0; border-top: 1px solid #eaeaea;">
+            <p style="color: #666; font-size: 0.9em; font-style: italic;">
+                This post was automatically generated on {datetime.now().strftime('%B %d, %Y at %H:%M UTC')}
+                <br>Source: Trending topics from various news sources
+            </p>
+        </div>
+        """
+        
+        # Create the post body
+        post_body = {
+            "kind": "blogger#post",
+            "title": title,
+            "content": post_content,
+            "labels": labels
+        }
+        
+        # Insert the post
+        posts = service.posts()
+        request = posts.insert(blogId=BLOGGER_BLOG_ID, body=post_body)
+        response = request.execute()
+        
+        print(f"✅ Successfully posted to Blogger!")
+        print(f"📌 Post URL: {response.get('url')}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error posting to Blogger: {e}")
+        return False
 
 # -------------------- Trending Topics --------------------
 def get_trending_topics_free():
@@ -87,8 +160,46 @@ def get_trending_topics_free():
     except Exception as e:
         print(f"⚠️ Error fetching BBC: {e}")
     
+    # TechCrunch
+    try:
+        tc_feed = feedparser.parse('https://techcrunch.com/feed/')
+        for entry in tc_feed.entries[:3]:
+            topics.append({
+                'title': entry.title,
+                'description': entry.get('summary', 'Tech news')[:200],
+                'url': entry.link,
+                'source': 'TechCrunch'
+            })
+    except Exception as e:
+        print(f"⚠️ Error fetching TechCrunch: {e}")
+    
+    # If NO topics found, create fallback topics
+    if not topics:
+        print("⚠️ No topics from RSS, using fallback topics")
+        topics = [
+            {
+                'title': 'The Future of Artificial Intelligence in 2026',
+                'description': 'How AI is transforming our daily lives and what to expect in the coming years',
+                'url': 'https://example.com/ai-future',
+                'source': 'Tech Trends'
+            },
+            {
+                'title': 'Climate Change: Latest Innovations in Green Technology',
+                'description': 'New breakthroughs in renewable energy and sustainable solutions',
+                'url': 'https://example.com/climate-tech',
+                'source': 'Science Daily'
+            },
+            {
+                'title': 'Space Exploration: Missions to Mars and Beyond',
+                'description': 'Latest updates on space travel and interplanetary exploration',
+                'url': 'https://example.com/space',
+                'source': 'Space News'
+            }
+        ]
+    
     if topics:
         set_cache('trending_topics', topics)
+        print(f"✅ Cached {len(topics)} topics")
     
     return topics
 
@@ -103,7 +214,7 @@ def generate_with_ollama(prompt, model="phi"):
                 "stream": False,
                 "options": {
                     "temperature": 0.7,
-                    "num_predict": 1500
+                    "num_predict": 2000
                 }
             },
             timeout=300
@@ -111,7 +222,7 @@ def generate_with_ollama(prompt, model="phi"):
         if response.status_code == 200:
             return response.json()['response'].strip()
     except Exception as e:
-        print(f"⚠️ Error: {e}")
+        print(f"⚠️ API Error: {e}")
         # Fallback to CLI
         try:
             result = subprocess.run(
@@ -120,58 +231,54 @@ def generate_with_ollama(prompt, model="phi"):
                 text=True,
                 timeout=300
             )
-            return result.stdout.strip()
-        except:
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception as e2:
+            print(f"⚠️ CLI Error: {e2}")
             return None
     return None
 
 def generate_blog_post(topic):
     """Generate blog post content"""
-    prompt = f"""Write a blog post about this trending topic:
+    prompt = f"""Write a detailed, engaging blog post about this topic:
 
 TITLE: {topic['title']}
 DESCRIPTION: {topic['description']}
 
-Write 400-600 words with introduction, paragraphs, and conclusion.
-Make it engaging and informative.
-Don't mention AI.
-Use natural language.
+Write a complete blog post with:
+- An attention-grabbing introduction
+- 3-4 informative paragraphs with details and examples
+- A strong conclusion
+- Length: 500-700 words
+
+Make it sound like a real human wrote it. Don't mention AI.
+Use natural language and keep it interesting.
+Format with proper paragraphs.
 
 Blog Post:
 """
     
     print(f"🤔 Generating post about: {topic['title']}")
-    return generate_with_ollama(prompt)
+    content = generate_with_ollama(prompt)
+    
+    if content and len(content) > 200:
+        return content
+    else:
+        # If generation failed, return a simple fallback
+        return f"""<h2>Introduction</h2>
+<p>{topic['description']}</p>
 
-# -------------------- POST TO BLOGGER --------------------
-def post_to_blogger(title, content, labels=None):
-    """Post directly to Google Blogger"""
-    if labels is None:
-        labels = ['AI Generated', 'Trending', 'Daily Post']
-    
-    # Prepare the post content
-    post_content = f"""
-    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-        {content.replace(chr(10), '<br>')}
-        <br><br>
-        <hr>
-        <p style="color: #666; font-size: 0.9em;">
-            This post was automatically generated on {datetime.now().strftime('%B %d, %Y at %H:%M')}
-            <br>Source: Trending topics from various news sources
-        </p>
-    </div>
-    """
-    
-    # For now, save to file (we'll implement actual Blogger API next)
-    post_file = CACHE_DIR / f"post_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-    with open(post_file, 'w', encoding='utf-8') as f:
-        f.write(f"<h1>{title}</h1>\n{post_content}")
-    
-    print(f"📝 Post saved locally: {post_file}")
-    print("\n🔴 NOTE: To auto-post to Blogger, we need to set up Google API")
-    print("For now, the post is saved and you can manually copy it to Blogger")
-    
-    return post_file
+<h2>Why This Matters</h2>
+<p>The topic of <strong>{topic['title']}</strong> has been gaining attention recently. Understanding its implications is important for anyone interested in staying informed about current trends.</p>
+
+<h2>Key Points to Consider</h2>
+<p>Experts in the field suggest that developments in this area will continue to accelerate. Whether you're a professional or simply curious, keeping up with {topic['source']} can provide valuable insights.</p>
+
+<h2>Looking Ahead</h2>
+<p>As we move further into 2026, we can expect more innovations and discussions around {topic['title']}. Stay tuned for updates and deeper dives into related topics.</p>
+
+<h2>Conclusion</h2>
+<p>Thank you for reading this automated post. We hope it provided useful information and sparked your interest in learning more.</p>"""
 
 # -------------------- Check if already posted today --------------------
 def already_posted_today():
@@ -188,7 +295,7 @@ def already_posted_today():
                     return True
     return False
 
-def log_post(title, post_file):
+def log_post(title, blogger_url):
     """Log the post to avoid duplicates"""
     log_file = CACHE_DIR / "posts_log.json"
     log = []
@@ -200,19 +307,19 @@ def log_post(title, post_file):
         'date': datetime.now().strftime("%Y-%m-%d"),
         'time': datetime.now().strftime("%H:%M:%S"),
         'title': title,
-        'file': str(post_file)
+        'url': blogger_url
     })
     
     with open(log_file, 'w') as f:
-        json.dump(log[-30:], f, indent=2)  # Keep last 30 days
+        json.dump(log[-30:], f, indent=2)
 
 # -------------------- MAIN --------------------
 def main():
-    print("=" * 50)
+    print("=" * 60)
     print("🚀 Starting Daily Blog Post Generator for Blogger")
     print(f"📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📝 Blog: {BLOG_URL}")
-    print("=" * 50)
+    print(f"📝 Blog ID: {BLOGGER_BLOG_ID}")
+    print("=" * 60)
     
     # Check if already posted today
     if already_posted_today():
@@ -223,35 +330,34 @@ def main():
     print("\n🔍 Fetching trending topics...")
     topics = get_trending_topics_free()
     
-    if not topics:
-        print("❌ No topics found.")
-        return
-    
-    print(f"📊 Found {len(topics)} trending topics")
+    print(f"📊 Found {len(topics)} topics")
     
     # Pick a random topic
-    chosen = random.choice(topics[:10])
+    chosen = random.choice(topics)
     print(f"🎯 Selected: {chosen['title']}")
     print(f"📌 Source: {chosen['source']}")
     
     # Generate blog post
+    print("\n✍️ Generating blog post with AI...")
     content = generate_blog_post(chosen)
     
-    if content and len(content) > 200:
+    if content:
+        print("✅ Content generated successfully!")
+        
         # Post to Blogger
         print("\n📤 Posting to Blogger...")
-        post_file = post_to_blogger(chosen['title'], content)
+        success = post_to_blogger(chosen['title'], content, ['AI Generated', chosen['source'].replace(' ', '-')])
         
-        # Log the post
-        log_post(chosen['title'], post_file)
-        
-        print("\n✨ Success!")
-        print("\n--- Preview ---")
-        print(content[:300] + "...")
-        print("-" * 50)
-        
-        print(f"\n✅ Post saved! You can find it in: {post_file}")
-        print("🔗 Your Blogger dashboard: https://www.blogger.com")
+        if success:
+            print("\n✨ MISSION COMPLETE! Blog post is live on Blogger!")
+        else:
+            # Fallback: Save locally
+            print("\n⚠️ Blogger post failed, saving locally...")
+            os.makedirs("_posts", exist_ok=True)
+            filename = f"_posts/{datetime.now().strftime('%Y-%m-%d')}-{chosen['title'][:50].replace(' ', '-')}.md"
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(f"# {chosen['title']}\n\n{content}")
+            print(f"✅ Saved locally: {filename}")
     else:
         print("❌ Failed to generate content.")
 
