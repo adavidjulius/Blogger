@@ -35,7 +35,7 @@ GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 
 # ==================== CONFIG ====================
 PRIMARY_MODEL = "falcon:7b"       # Main model
-FALLBACK_MODEL = "phi-3"             # Backup model (smaller, faster)
+FALLBACK_MODEL = "phi3"             # Backup model (smaller, faster)
 NUM_POSTS_PER_DAY = 3               # Three posts daily
 
 # ==================== SETUP ====================
