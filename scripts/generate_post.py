@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster – Llama 3 + Unsplash Images
-- Model priority: llama3:8b → mistral:7b → falcon:7b → phi
-- Reliable images from Unsplash (free, no key)
-- Beautiful fallback banners
+Blogger Auto-Poster with AirLLM – Run massive models on low VRAM
+- Uses AirLLM to load models incrementally
+- Can run Llama 3 70B even on 4GB GPU
+- Falls back to phi if AirLLM fails
 """
 
 import os
@@ -11,9 +11,9 @@ import sys
 import requests
 import feedparser
 import random
-import subprocess
 import traceback
 import urllib.parse
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -21,18 +21,26 @@ from pathlib import Path
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
-from google.auth.exceptions import RefreshError
-from googleapiclient.errors import HttpError
 
-# ==================== READ SECRETS ====================
+# AirLLM
+try:
+    from airllm import AutoModel
+    AIRLLM_AVAILABLE = True
+except ImportError:
+    AIRLLM_AVAILABLE = False
+    print("⚠️ AirLLM not installed, falling back to regular generation")
+
+# ==================== CONFIG ====================
 BLOGGER_BLOG_ID = os.getenv("BLOGGER_BLOG_ID")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 
-# ==================== CONFIG ====================
-MODEL_PRIORITY = ["llama3:8b", "mistral:7b", "falcon:7b", "phi"]
-NUM_POSTS_PER_DAY = 1  # one per run (3 runs daily)
+# Model selection – AirLLM can handle huge models!
+# Uncomment the one you want to use:
+AIRLLM_MODEL = "v2ray/Llama-3-70B"  # Llama 3 70B [citation:6]
+# AIRLLM_MODEL = "meta-llama/Llama-3.1-405B-Instruct"  # For 405B (needs 8GB)
+# AIRLLM_MODEL = "garage-bAInd/Platypus2-70B-instruct"  # Alternative 70B
 
 # ==================== SETUP ====================
 CACHE_DIR = Path(".blog-cache")
@@ -49,47 +57,33 @@ def log_error(step, error, details=None):
         print(f"   Details: {details}")
     print(f"   Traceback: {traceback.format_exc()}")
 
-# ==================== IMAGE – UNSPLASH (ALWAYS WORKS) ====================
+# ==================== IMAGE (Unsplash) ====================
 def get_unsplash_image(topic_title):
-    """Unsplash random image based on topic keywords."""
     try:
-        # Extract top 3 keywords
         keywords = '+'.join(topic_title.split()[:3])
-        # Unsplash source returns a direct image URL
-        response = requests.get(
+        resp = requests.get(
             f"https://source.unsplash.com/featured/1200x600/?{keywords}",
             timeout=10,
             allow_redirects=False
         )
-        if response.status_code == 302 and 'location' in response.headers:
-            return response.headers['location']
+        if resp.status_code == 302 and 'location' in resp.headers:
+            return resp.headers['location']
     except:
         pass
     return None
 
 def create_image_html(title):
-    """Generate image HTML with fallback."""
-    # Try Unsplash
     img_url = get_unsplash_image(title)
     if img_url:
         return f'''
         <div style="margin-bottom:30px; text-align:center;">
             <img src="{img_url}" alt="{title}"
                  style="width:100%; max-width:900px; height:auto; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);">
-            <p style="color:#777; font-size:0.8em;">📸 Photo from Unsplash (related to "{title}")</p>
+            <p style="color:#777; font-size:0.8em;">📸 Photo from Unsplash</p>
         </div>
         '''
-    # Ultimate fallback – beautiful gradient banner
-    colors = [
-        'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-        'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-        'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-        'linear-gradient(135deg, #fa709a 0%, #fee140 100%)'
-    ]
-    gradient = random.choice(colors)
     return f'''
-    <div style="margin-bottom:30px; text-align:center; background:{gradient}; padding:50px; border-radius:12px; color:white;">
+    <div style="margin-bottom:30px; text-align:center; background:linear-gradient(135deg,#667eea,#764ba2); padding:50px; border-radius:12px; color:white;">
         <span style="font-size:48px;">📰</span>
         <h2 style="color:white;">{title}</h2>
         <p>Today's featured story</p>
@@ -117,10 +111,6 @@ def get_blogger_service():
         blog_info = service.blogs().get(blogId=BLOGGER_BLOG_ID).execute()
         print(f"✅ Blog verified: {blog_info.get('name')}")
         return service
-    except RefreshError as e:
-        log_error("Token Refresh", str(e))
-        print("🔑 Need new refresh token.")
-        return None
     except Exception as e:
         log_error("Authentication", str(e))
         return None
@@ -133,7 +123,7 @@ def post_to_blogger(title, content, labels=None):
         return False, "Auth failed"
 
     image_html = create_image_html(title)
-    full_content = image_html + content.replace('\n', '<br>')
+    full_content = image_html + content
 
     post_body = {
         "kind": "blogger#post",
@@ -154,10 +144,6 @@ def post_to_blogger(title, content, labels=None):
         response = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body).execute()
         print(f"✅ Post published: {response.get('url')}")
         return True, response.get('url')
-    except HttpError as e:
-        status = e.resp.status
-        log_error("Blogger API", str(e), f"HTTP {status}")
-        return False, str(e)
     except Exception as e:
         log_error("Blogger API", str(e))
         return False, str(e)
@@ -186,77 +172,137 @@ def get_trending_topics():
 
     if not topics:
         topics = [
-            {'title': 'The Rise of Generative AI in Everyday Life', 'description': 'How AI tools are changing work and creativity', 'source': 'Tech'},
-            {'title': 'Breakthroughs in Renewable Energy Storage', 'description': 'New battery technologies that could transform the grid', 'source': 'Science'},
-            {'title': 'The Future of Space Tourism', 'description': 'Companies like SpaceX and Blue Origin are making space travel accessible', 'source': 'Space'},
+            {'title': 'The Rise of Generative AI', 'description': 'How AI tools are transforming creativity', 'source': 'Tech'},
+            {'title': 'Breakthroughs in Battery Technology', 'description': 'New storage solutions for renewable energy', 'source': 'Science'},
         ]
     random.shuffle(topics)
     return topics
 
-# ==================== GENERATE WITH OLLAMA (MODEL PRIORITY) ====================
-def generate_with_ollama(prompt, model_list=None):
-    if model_list is None:
-        model_list = MODEL_PRIORITY
-
-    for model in model_list:
-        print(f"\n🤖 Trying model: {model}...")
-        try:
-            resp = requests.post('http://localhost:11434/api/generate',
-                                  json={
-                                      "model": model,
-                                      "prompt": prompt,
-                                      "stream": False,
-                                      "options": {
-                                          "temperature": 0.8,
-                                          "num_predict": 1500,
-                                          "top_k": 40,
-                                          "top_p": 0.9
-                                      }
-                                  },
-                                  timeout=600)
-            if resp.status_code == 200:
-                content = resp.json().get('response', '').strip()
-                if content and len(content) > 200:
-                    print(f"✅ Success with {model} ({len(content)} chars)")
-                    return content
-        except Exception as e:
-            print(f"⚠️ {model} failed: {e}")
-
-    # Ultimate fallback
-    print("❌ All models failed. Using emergency fallback.")
-    return f"""
-    <h2>Today's Topic: {prompt[:100]}...</h2>
-    <p>We're discussing an important subject that's generating interest worldwide.</p>
-    <h3>Key Points</h3>
-    <p>Staying informed helps us understand the world. We'll continue to monitor developments.</p>
-    <h3>Conclusion</h3>
-    <p>Thank you for reading. More updates coming soon.</p>
+# ==================== AIRLLM GENERATION (THE MAGIC!) ====================
+def generate_with_airllm(prompt, model_name=AIRLLM_MODEL):
     """
+    Generate using AirLLM – can run 70B models on 4GB GPU!
+    Based on official AirLLM documentation [citation:5][citation:6]
+    """
+    if not AIRLLM_AVAILABLE:
+        return None, "AirLLM not installed"
+    
+    try:
+        print(f"\n🤖 Loading AirLLM model: {model_name}")
+        print("   (This may take a few minutes for first load as model is prepared layer-wise)")
+        
+        # Load model with AirLLM [citation:5]
+        MAX_LENGTH = 256
+        model = AutoModel.from_pretrained(
+            model_name,
+            compression='4bit',  # Optional: speeds up by 3x with minimal quality loss [citation:5]
+            # hf_token='YOUR_TOKEN'  # Uncomment for gated models like meta-llama/Llama-2-7b-hf
+        )
+        
+        print("✅ Model loaded successfully!")
+        
+        # Tokenize input
+        input_tokens = model.tokenizer(
+            [prompt],
+            return_tensors="pt",
+            return_attention_mask=False,
+            truncation=True,
+            max_length=MAX_LENGTH,
+            padding=False
+        )
+        
+        # Move to GPU (required for AirLLM) [citation:1]
+        input_ids = input_tokens['input_ids'].cuda()
+        
+        print("⏳ Generating with AirLLM (this may take a few minutes per request)...")
+        generation_output = model.generate(
+            input_ids,
+            max_new_tokens=800,
+            use_cache=True,
+            return_dict_in_generate=True,
+            temperature=0.8,
+            do_sample=True
+        )
+        
+        # Decode output
+        output = model.tokenizer.decode(generation_output.sequences[0])
+        
+        # Clean up prompt from output if included
+        if output.startswith(prompt):
+            output = output[len(prompt):].strip()
+        
+        print(f"✅ Generation complete ({len(output)} chars)")
+        return output, None
+        
+    except Exception as e:
+        error_msg = f"AirLLM error: {e}"
+        log_error("AirLLM Generation", str(e))
+        
+        # Check for common errors [citation:5]
+        if "MetadataIncompleteBuffer" in str(e):
+            print("💾 Disk space error! The model splitting needs more space.")
+            print("   Try clearing cache or increasing disk space.")
+        elif "401 Client Error" in str(e):
+            print("🔑 This model is gated. You need a Hugging Face token.")
+        elif "max() arg is an empty sequence" in str(e):
+            print("🔄 Wrong model class. Use AutoModel instead of specific classes.")
+        
+        return None, error_msg
 
+# ==================== FALLBACK GENERATION (phi) ====================
+def generate_fallback(prompt):
+    """Fallback to phi if AirLLM fails"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['/usr/local/bin/ollama', 'run', 'phi', prompt],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except:
+        pass
+    
+    # Ultimate fallback
+    return f"""
+<h2>Today's Topic</h2>
+<p>We're discussing: {prompt[:100]}...</p>
+<h2>Key Points</h2>
+<p>This topic has been generating interest recently. Staying informed helps us understand the world.</p>
+<h2>Conclusion</h2>
+<p>Thank you for reading. More updates coming soon.</p>
+"""
+
+# ==================== MAIN GENERATION FUNCTION ====================
 def generate_blog_post(topic):
-    prompt = f"""You are an expert blog writer. Write a compelling, well-researched blog post based on the following topic.
+    """Try AirLLM first, fallback to phi if fails"""
+    
+    prompt = f"""Write a detailed, engaging blog post about this topic.
 
 TITLE: {topic['title']}
 DESCRIPTION: {topic['description']}
 SOURCE: {topic['source']}
 
-STRUCTURE:
-1. **Headline** – use the title as given.
-2. **Introduction** – hook the reader with a question, surprising fact, or anecdote.
-3. **Main Body** – 3-4 paragraphs with subheadings. Include:
-   - Specific examples or case studies
-   - Quotes from experts (you can invent plausible ones)
-   - Relevant data or statistics
-4. **Conclusion** – summarize key takeaways and end with a thought-provoking question or call to action.
-
-TONE: Professional but accessible, engaging, slightly conversational.
-LENGTH: 500-700 words.
-
-Write the post in plain text (no markdown). Use proper paragraphs.
+Instructions:
+- Write 500-700 words.
+- Start with a hook (question, fact, anecdote).
+- Use subheadings for structure.
+- Include specific examples and insights.
+- End with a conclusion that summarizes key points.
+- Be insightful and thought-provoking.
 
 POST:
 """
-    return generate_with_ollama(prompt)
+    
+    # Try AirLLM first
+    content, error = generate_with_airllm(prompt)
+    
+    if content:
+        return content
+    else:
+        print(f"\n⚠️ AirLLM failed: {error}")
+        print("🔄 Falling back to phi model...")
+        return generate_fallback(prompt)
 
 # ==================== LOCAL BACKUP ====================
 def save_local_post(title, content):
@@ -271,21 +317,25 @@ def save_local_post(title, content):
 
 # ==================== MAIN ====================
 def main():
-    print("="*60)
-    print("🚀 AI BLOGGER – Llama 3 + Unsplash Images")
+    print("="*70)
+    print("🚀 AI BLOGGER – AirLLM Edition (Running massive models!)")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*60)
+    print(f"📦 Model: {AIRLLM_MODEL}")
+    print("="*70)
 
-    missing = []
-    if not BLOGGER_BLOG_ID: missing.append("BLOGGER_BLOG_ID")
-    if not GOOGLE_CLIENT_ID: missing.append("GOOGLE_CLIENT_ID")
-    if not GOOGLE_CLIENT_SECRET: missing.append("GOOGLE_CLIENT_SECRET")
-    if not GOOGLE_REFRESH_TOKEN: missing.append("GOOGLE_REFRESH_TOKEN")
+    # Check secrets
+    missing = [name for name, val in [
+        ("BLOGGER_BLOG_ID", BLOGGER_BLOG_ID),
+        ("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID),
+        ("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET),
+        ("GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN)
+    ] if not val]
     if missing:
-        print(f"❌ Missing: {', '.join(missing)}")
+        print(f"❌ Missing secrets: {', '.join(missing)}")
         sys.exit(1)
     print("✅ Credentials OK.")
 
+    # Get topics
     topics = get_trending_topics()
     if not topics:
         print("❌ No topics.")
@@ -294,27 +344,30 @@ def main():
     topic = random.choice(topics)
     print(f"\n🎯 Topic: {topic['title']} ({topic['source']})")
 
-    print("\n✍️ Generating high-quality post with Llama 3...")
+    # Generate content
+    print("\n✍️ Generating with AirLLM (this may take 3-5 minutes)...")
     content = generate_blog_post(topic)
 
+    # Save backup
     local = save_local_post(topic['title'], content)
 
-    print("\n📤 Posting to Blogger with Unsplash image...")
+    # Post to Blogger
+    print("\n📤 Posting to Blogger...")
     success, result = post_to_blogger(
         topic['title'],
         content,
-        labels=['AI Generated', topic['source'].replace(' ', '-'), 'Llama3']
+        labels=['AI Generated', topic['source'].replace(' ', '-'), 'AirLLM']
     )
 
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     if success:
-        print("✨ SUCCESS! Post published.")
+        print("✨ SUCCESS! Post published with AirLLM.")
         print(f"📌 {result}")
     else:
         print("⚠️ Blogger failed, but backup saved.")
         print(f"📁 {local}")
         print(f"🔍 Error: {result}")
-    print("="*60)
+    print("="*70)
 
 if __name__ == "__main__":
     try:
