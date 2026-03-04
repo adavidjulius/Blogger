@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster with Stable Diffusion Images
-- Uses Ollama for content generation
-- Uses dusty-nv/small-stable-diffusion for AI image generation
-- Falls back to Unsplash if Stable Diffusion fails
-- Beautiful formatting with multiple fallbacks
+Blogger Auto-Poster – Long Form + News Images + Logo
+- Fetches image from RSS feed (if available)
+- Falls back to Unsplash
+- Generates 3000-4000 word posts with synopsis and sections
+- Adds logo at bottom (base64 embedded)
 """
 
 import os
@@ -20,6 +20,7 @@ import base64
 from datetime import datetime
 from pathlib import Path
 import json
+import re
 
 # Google API
 from google.oauth2.credentials import Credentials
@@ -28,7 +29,14 @@ from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-# ==================== READ SECRETS FROM ENVIRONMENT ====================
+# For potential image processing (not strictly needed)
+try:
+    from PIL import Image
+    PILLOW_AVAILABLE = True
+except:
+    PILLOW_AVAILABLE = False
+
+# ==================== READ SECRETS ====================
 BLOGGER_BLOG_ID = os.getenv("BLOGGER_BLOG_ID")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -37,17 +45,13 @@ GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 # ==================== CONFIG ====================
 PRIMARY_MODEL = "llama3:8b"
 FALLBACK_MODEL = "phi"
-
-# Path to Stable Diffusion
-SD_PATH = "small-stable-diffusion"
+LOGO_PATH = Path("logo.png")  # Your logo file (place in repo root)
 
 # ==================== SETUP ====================
 CACHE_DIR = Path(".blog-cache")
 POSTS_DIR = Path("_posts")
-IMAGES_DIR = Path("images")
 CACHE_DIR.mkdir(exist_ok=True)
 POSTS_DIR.mkdir(exist_ok=True)
-IMAGES_DIR.mkdir(exist_ok=True)
 
 def log_error(step, error, details=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -58,145 +62,94 @@ def log_error(step, error, details=None):
         print(f"   Details: {details}")
     print(f"   Traceback: {traceback.format_exc()}")
 
-# ==================== STABLE DIFFUSION IMAGE GENERATION ====================
-def generate_image_with_sd(prompt, output_path):
-    """
-    Generate image using dusty-nv/small-stable-diffusion
-    """
+# ==================== IMAGE FETCHING ====================
+def extract_image_from_entry(entry):
+    """Try to extract image URL from RSS entry (media:content, enclosure, etc.)"""
+    # Check media:content
+    if hasattr(entry, 'media_content') and entry.media_content:
+        for media in entry.media_content:
+            if 'url' in media:
+                return media['url']
+    # Check media:thumbnail
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        for thumb in entry.media_thumbnail:
+            if 'url' in thumb:
+                return thumb['url']
+    # Check enclosures
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get('type', '').startswith('image/'):
+                return enc.get('href') or enc.get('url')
+    # Some feeds use media:group
+    if hasattr(entry, 'media_group') and entry.media_group:
+        for group in entry.media_group:
+            if hasattr(group, 'media_content'):
+                for mc in group.media_content:
+                    if 'url' in mc:
+                        return mc['url']
+    return None
+
+def get_unsplash_image(keywords):
+    """Fallback to Unsplash if no image in feed"""
     try:
-        print(f"🎨 Generating image with Stable Diffusion...")
-        
-        # Create a simple Python script to run Stable Diffusion
-        sd_script = f"""
-import sys
-sys.path.append('{SD_PATH}')
-from diffusers import StableDiffusionPipeline
-import torch
-from PIL import Image
-
-# Load model
-pipe = StableDiffusionPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5",
-    torch_dtype=torch.float16,
-    safety_checker=None
-)
-pipe = pipe.to("cuda")
-
-# Generate image
-prompt = "{prompt}"
-image = pipe(prompt, num_inference_steps=30).images[0]
-
-# Save image
-image.save("{output_path}")
-print("✅ Image generated and saved")
-"""
-        
-        # Write script to file
-        script_path = CACHE_DIR / "generate_image.py"
-        with open(script_path, 'w') as f:
-            f.write(sd_script)
-        
-        # Run the script
-        result = subprocess.run(
-            ['python', str(script_path)],
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        
-        if result.returncode == 0 and os.path.exists(output_path):
-            print(f"✅ Image saved to {output_path}")
-            return True
-        else:
-            print(f"⚠️ SD error: {result.stderr[:200]}")
-            return False
-            
-    except Exception as e:
-        print(f"⚠️ Stable Diffusion error: {e}")
-        return False
-
-def get_unsplash_image(topic_title):
-    """Fallback to Unsplash if SD fails"""
-    try:
-        # Extract keywords from title (first 3 meaningful words)
-        words = topic_title.split()[:3]
-        clean_words = []
-        for w in words:
-            clean = ''.join(c for c in w if c.isalnum())
-            if clean and len(clean) > 2:
-                clean_words.append(clean)
-        
-        if not clean_words:
-            clean_words = ["technology", "news"]
-        
-        keywords = '+'.join(clean_words)
-        
-        response = requests.get(
-            f"https://source.unsplash.com/featured/1200x600/?{keywords}",
+        if not keywords:
+            keywords = "news"
+        clean = '+'.join(keywords.split()[:3])
+        resp = requests.get(
+            f"https://source.unsplash.com/featured/1200x600/?{clean}",
             timeout=10,
             allow_redirects=False
         )
-        if response.status_code == 302 and 'location' in response.headers:
-            return response.headers['location']
+        if resp.status_code == 302 and 'location' in resp.headers:
+            return resp.headers['location']
     except:
         pass
     return None
 
-def create_image_html(title):
-    """
-    Create HTML for image – tries Stable Diffusion first, then Unsplash
-    """
-    # Try Stable Diffusion first
-    image_filename = f"sd_image_{int(time.time())}.png"
-    image_path = IMAGES_DIR / image_filename
-    
-    # Create prompt from title
-    sd_prompt = f"Professional blog header image about {title}, high quality, detailed, 4k"
-    
-    success = generate_image_with_sd(sd_prompt, str(image_path))
-    
-    if success:
-        # Convert to base64 and embed
-        try:
-            with open(image_path, 'rb') as f:
-                img_data = f.read()
-                img_b64 = base64.b64encode(img_data).decode('utf-8')
-            
-            return f'''
-            <div style="margin-bottom:30px; text-align:center;">
-                <img src="data:image/png;base64,{img_b64}" alt="{title}"
-                     style="width:100%; max-width:900px; height:auto; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);">
-                <p style="color:#777; font-size:0.8em;">🎨 AI-generated by Stable Diffusion</p>
-            </div>
-            '''
-        except Exception as e:
-            print(f"⚠️ Base64 conversion error: {e}")
-    
-    # Fallback to Unsplash
-    img_url = get_unsplash_image(title)
-    if img_url:
-        return f'''
-        <div style="margin-bottom:30px; text-align:center;">
-            <img src="{img_url}" alt="{title}"
-                 style="width:100%; max-width:900px; height:auto; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);">
-            <p style="color:#777; font-size:0.8em;">📸 Photo from Unsplash</p>
-        </div>
-        '''
-    
-    # Ultimate fallback – gradient banner
-    gradients = [
-        'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-        'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-        'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)'
-    ]
-    gradient = random.choice(gradients)
-    
+def get_image_url(entry, topic_title):
+    """Main function: try RSS first, then Unsplash"""
+    url = extract_image_from_entry(entry)
+    if url:
+        print(f"🖼️ Found image in RSS feed: {url[:60]}...")
+        return url
+    print("🖼️ No image in RSS, trying Unsplash...")
+    return get_unsplash_image(topic_title)
+
+def create_image_html(img_url, title):
+    """Generate HTML for the image"""
+    if not img_url:
+        return ''  # No image
     return f'''
-    <div style="margin-bottom:30px; text-align:center; background:{gradient}; padding:50px; border-radius:12px; color:white;">
-        <span style="font-size:48px;">📰</span>
-        <h2 style="color:white;">{title}</h2>
-        <p>Today's featured story</p>
+    <div style="margin-bottom:30px; text-align:center;">
+        <img src="{img_url}" alt="{title}"
+             style="width:100%; max-width:900px; height:auto; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);">
+        <p style="color:#777; font-size:0.8em;">📸 Image source: {'Unsplash' if 'unsplash' in img_url else 'News feed'}</p>
+    </div>
+    '''
+
+# ==================== LOGO (BASE64) ====================
+def get_logo_base64():
+    """Read logo.png and return base64 string"""
+    if not LOGO_PATH.exists():
+        print("⚠️ Logo file not found, skipping logo.")
+        return None
+    try:
+        with open(LOGO_PATH, 'rb') as f:
+            img_data = f.read()
+        return base64.b64encode(img_data).decode('utf-8')
+    except Exception as e:
+        log_error("Logo read", str(e))
+        return None
+
+def create_logo_html():
+    """Generate HTML for logo at bottom"""
+    b64 = get_logo_base64()
+    if not b64:
+        return ''
+    return f'''
+    <div style="margin-top:40px; text-align:center; padding:20px; border-top:1px solid #eaeaea;">
+        <img src="data:image/png;base64,{b64}" alt="Blog Logo" style="max-width:200px; height:auto;">
+        <p style="color:#777; font-size:0.8em;">© {datetime.now().year} ReadContext</p>
     </div>
     '''
 
@@ -229,19 +182,18 @@ def get_blogger_service():
         log_error("Authentication", str(e))
         return None
 
-def post_to_blogger(title, content, labels=None):
+def post_to_blogger(title, content, img_url, labels=None):
     if labels is None:
-        labels = ['AI Generated', 'Trending', 'StableDiffusion']
-    
+        labels = ['AI Generated', 'Trending', 'LongForm']
+
     service = get_blogger_service()
     if not service:
         return False, "Auth failed"
 
-    # Generate and add image
-    print("\n🖼️ Creating image for post...")
-    image_html = create_image_html(title)
-    
-    full_content = image_html + content.replace('\n', '<br>')
+    # Build post content: image at top, then article, then logo
+    image_html = create_image_html(img_url, title)
+    logo_html = create_logo_html()
+    full_content = image_html + content.replace('\n', '<br>') + logo_html
 
     post_body = {
         "kind": "blogger#post",
@@ -262,23 +214,19 @@ def post_to_blogger(title, content, labels=None):
         response = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body).execute()
         print(f"✅ Post published: {response.get('url')}")
         return True, response.get('url')
-    except HttpError as e:
-        status = e.resp.status
-        log_error("Blogger API", str(e), f"HTTP {status}")
-        return False, str(e)
     except Exception as e:
         log_error("Blogger API", str(e))
         return False, str(e)
 
-# ==================== FETCH TRENDING TOPICS ====================
+# ==================== FETCH TRENDING TOPICS (with full entry) ====================
 def get_trending_topics():
     topics = []
     sources = [
-        ('https://news.ycombinator.com/rss', 'Hacker News', 5),
-        ('http://feeds.bbci.co.uk/news/rss.xml', 'BBC', 3),
-        ('https://techcrunch.com/feed/', 'TechCrunch', 3),
+        ('https://news.ycombinator.com/rss', 'Hacker News', 3),
+        ('http://feeds.bbci.co.uk/news/rss.xml', 'BBC', 2),
+        ('https://techcrunch.com/feed/', 'TechCrunch', 2),
     ]
-    
+
     for url, name, limit in sources:
         try:
             feed = feedparser.parse(url)
@@ -286,26 +234,24 @@ def get_trending_topics():
                 if entry.title and '[Removed]' not in entry.title:
                     topics.append({
                         'title': entry.title,
-                        'description': entry.get('summary', '')[:300],
-                        'source': name
+                        'description': entry.get('summary', '')[:500],
+                        'source': name,
+                        'entry': entry  # Store full entry for image extraction
                     })
         except Exception as e:
             log_error(f"RSS {name}", str(e))
 
     if not topics:
         topics = [
-            {'title': 'The Future of AI', 'description': 'How AI is transforming our world', 'source': 'Tech'},
-            {'title': 'Climate Tech Innovations', 'description': 'Breakthroughs in green energy', 'source': 'Science'},
-            {'title': 'Space Exploration Updates', 'description': 'New missions to the Moon and Mars', 'source': 'Space'}
+            {'title': 'The Future of AI', 'description': 'How AI is transforming our world', 'source': 'Tech', 'entry': None},
+            {'title': 'Climate Tech Innovations', 'description': 'Breakthroughs in green energy', 'source': 'Science', 'entry': None},
         ]
-    
     random.shuffle(topics)
     return topics
 
-# ==================== GENERATE WITH OLLAMA ====================
+# ==================== GENERATE LONG CONTENT ====================
 def generate_with_ollama(prompt, model=PRIMARY_MODEL):
-    """Generate text using Ollama"""
-    
+    """Generate text using Ollama – increased token limit for long posts"""
     # Try API
     try:
         resp = requests.post('http://localhost:11434/api/generate',
@@ -315,10 +261,12 @@ def generate_with_ollama(prompt, model=PRIMARY_MODEL):
                                   "stream": False,
                                   "options": {
                                       "temperature": 0.8,
-                                      "num_predict": 1200
+                                      "num_predict": 4096,   # ~4000 words
+                                      "top_k": 40,
+                                      "top_p": 0.9
                                   }
                               },
-                              timeout=300)
+                              timeout=600)  # 10 minutes
         if resp.status_code == 200:
             content = resp.json().get('response', '').strip()
             if content:
@@ -330,7 +278,7 @@ def generate_with_ollama(prompt, model=PRIMARY_MODEL):
     try:
         result = subprocess.run(
             ['/usr/local/bin/ollama', 'run', model, prompt],
-            capture_output=True, text=True, timeout=300
+            capture_output=True, text=True, timeout=600
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -341,42 +289,35 @@ def generate_with_ollama(prompt, model=PRIMARY_MODEL):
     if model != FALLBACK_MODEL:
         print(f"🔄 Falling back to {FALLBACK_MODEL}...")
         return generate_with_ollama(prompt, FALLBACK_MODEL)
-    
+
     return None
 
 def generate_blog_post(topic):
-    prompt = f"""Write a detailed, engaging blog post about:
+    """Craft a detailed prompt for a long, structured post."""
+    prompt = f"""Write a comprehensive, in-depth blog post about the following topic.
 
 TITLE: {topic['title']}
 DESCRIPTION: {topic['description']}
 SOURCE: {topic['source']}
 
-Write 400-500 words with:
-- An engaging introduction
-- 3-4 informative paragraphs
-- A strong conclusion
+REQUIREMENTS:
+- Length: 3000-4000 words
+- Structure:
+  1. **Synopsis/Executive Summary** – a brief overview of the entire post (2-3 paragraphs)
+  2. **Introduction** – hook the reader, explain why this topic matters
+  3. **Background** – provide context, history, or key facts
+  4. **Main Analysis** – break into 4-6 subsections with subheadings (e.g., "The Current Situation", "Key Players", "Challenges", "Future Outlook")
+  5. **Implications** – what does this mean for readers, industry, or society?
+  6. **Conclusion** – summarize main points and end with a thought-provoking question or call to action
+- Include specific examples, data points, or expert quotes (you can invent plausible ones)
+- Write in a professional but accessible tone
+- Use proper paragraphs and subheadings (marked as <h2>, <h3>)
 
-Make it professional and interesting.
+Write the post in plain text with HTML tags for headings.
 
 POST:
 """
-    
-    content = generate_with_ollama(prompt)
-    
-    if content:
-        return content
-    
-    # Fallback content
-    return f"""
-<h2>Introduction</h2>
-<p>Today we're discussing <strong>{topic['title']}</strong>. This topic has been generating significant interest recently.</p>
-
-<h2>Key Points</h2>
-<p>{topic['description']}</p>
-
-<h2>Conclusion</h2>
-<p>Thank you for reading. More updates coming soon.</p>
-"""
+    return generate_with_ollama(prompt)
 
 # ==================== LOCAL BACKUP ====================
 def save_local_post(title, content):
@@ -392,21 +333,16 @@ def save_local_post(title, content):
 # ==================== MAIN ====================
 def main():
     print("="*70)
-    print("🚀 AI BLOGGER – Stable Diffusion Edition")
+    print("🚀 AI BLOGGER – Long Form + News Images + Logo")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
     # Check secrets
     missing = []
-    if not BLOGGER_BLOG_ID:
-        missing.append("BLOGGER_BLOG_ID")
-    if not GOOGLE_CLIENT_ID:
-        missing.append("GOOGLE_CLIENT_ID")
-    if not GOOGLE_CLIENT_SECRET:
-        missing.append("GOOGLE_CLIENT_SECRET")
-    if not GOOGLE_REFRESH_TOKEN:
-        missing.append("GOOGLE_REFRESH_TOKEN")
-    
+    if not BLOGGER_BLOG_ID: missing.append("BLOGGER_BLOG_ID")
+    if not GOOGLE_CLIENT_ID: missing.append("GOOGLE_CLIENT_ID")
+    if not GOOGLE_CLIENT_SECRET: missing.append("GOOGLE_CLIENT_SECRET")
+    if not GOOGLE_REFRESH_TOKEN: missing.append("GOOGLE_REFRESH_TOKEN")
     if missing:
         print(f"❌ Missing secrets: {', '.join(missing)}")
         sys.exit(1)
@@ -417,29 +353,45 @@ def main():
     if not topics:
         print("❌ No topics available")
         sys.exit(1)
-    
+
     topic = random.choice(topics)
     print(f"\n🎯 Topic: {topic['title']}")
     print(f"📌 Source: {topic['source']}")
 
-    # Generate content
-    print("\n✍️ Generating content with Llama 3...")
+    # Get image from RSS entry (if available)
+    img_url = None
+    if topic.get('entry'):
+        img_url = get_image_url(topic['entry'], topic['title'])
+    if not img_url:
+        img_url = get_unsplash_image(topic['title'])
+    if img_url:
+        print(f"✅ Image URL: {img_url[:60]}...")
+    else:
+        print("⚠️ No image found, proceeding without image.")
+
+    # Generate long content
+    print("\n✍️ Generating long-form content (3000-4000 words)...")
     content = generate_blog_post(topic)
+    if not content:
+        print("❌ Content generation failed")
+        sys.exit(1)
+    print(f"✅ Content generated ({len(content)} chars)")
 
     # Save backup
     local_file = save_local_post(topic['title'], content)
 
-    # Post with image
-    print("\n📤 Posting to Blogger with Stable Diffusion image...")
+    # Post to Blogger
+    print("\n📤 Posting to Blogger...")
     success, result = post_to_blogger(
-        topic['title'], 
+        topic['title'],
         content,
-        labels=['AI Generated', topic['source'].replace(' ', '-'), 'StableDiffusion']
+        img_url,
+        labels=['AI Generated', topic['source'].replace(' ', '-'), 'LongForm']
     )
 
     print("\n" + "="*70)
     if success:
-        print(f"✨ SUCCESS! Post published!")
+        print("✨ SUCCESS! Post published!")
         print(f"📌 URL: {result}")
         print(f"📁 Backup: {local_file}")
     else:
