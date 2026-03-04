@@ -18,55 +18,47 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
           cache: 'pip'
 
-      # ===== INSTALL OLLAMA FIRST =====
-      - name: Install Ollama
+      # Cache Ollama to avoid re-downloading models
+      - name: Cache Ollama
+        id: cache-ollama
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.ollama
+            /usr/local/bin/ollama
+          key: ${{ runner.os }}-ollama
+
+      - name: Install Ollama (if not cached)
+        if: steps.cache-ollama.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           echo "/usr/local/bin" >> $GITHUB_PATH
-          echo "✅ Ollama installed"
-
-      - name: Verify Ollama installation
-        run: |
-          which ollama
-          /usr/local/bin/ollama --version
 
       - name: Start Ollama service
         run: |
           /usr/local/bin/ollama serve &
-          sleep 15
-          for i in {1..15}; do
+          sleep 10
+          for i in {1..10}; do
             if curl -s http://localhost:11434/api/tags > /dev/null; then
-              echo "✅ Ollama is ready"
+              echo "✅ Ollama ready"
               break
             fi
-            echo "Waiting for Ollama... ($i/15)"
             sleep 3
           done
 
-      # ===== PULL MODELS =====
-      - name: Pull required models
+      - name: Pull models (Llama 3 + phi)
         run: |
           /usr/local/bin/ollama pull llama3:8b
           /usr/local/bin/ollama pull phi
-          /usr/local/bin/ollama list
 
-      # ===== INSTALL STABLE DIFFUSION =====
-      - name: Install Stable Diffusion
-        run: |
-          git clone https://github.com/dusty-nv/small-stable-diffusion.git
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-          pip install diffusers transformers accelerate pillow
-
-      # ===== INSTALL PYTHON DEPENDENCIES =====
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+          pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pillow
 
-      # ===== GENERATE AND POST =====
       - name: Generate and post to Blogger
         env:
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
@@ -74,15 +66,12 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: |
-          mkdir -p .blog-cache _posts images
+          mkdir -p .blog-cache _posts
           python scripts/generate_post.py
 
-      # ===== UPLOAD BACKUP =====
-      - name: Upload post artifact
+      - name: Upload post artifact (backup)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: blog-post-${{ github.run_id }}
-          path: |
-            _posts/*.md
-            images/*.png
+          path: _posts/*.md
