@@ -28,16 +28,13 @@ from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-# Stable Diffusion import (will be handled with subprocess)
-# We'll call the Python script directly
-
-# ==================== CONFIG ====================
+# ==================== READ SECRETS FROM ENVIRONMENT ====================
 BLOGGER_BLOG_ID = os.getenv("BLOGGER_BLOG_ID")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 
-# Models
+# ==================== CONFIG ====================
 PRIMARY_MODEL = "llama3:8b"
 FALLBACK_MODEL = "phi"
 
@@ -121,7 +118,19 @@ print("✅ Image generated and saved")
 def get_unsplash_image(topic_title):
     """Fallback to Unsplash if SD fails"""
     try:
-        keywords = '+'.join(topic_title.split()[:3])
+        # Extract keywords from title (first 3 meaningful words)
+        words = topic_title.split()[:3]
+        clean_words = []
+        for w in words:
+            clean = ''.join(c for c in w if c.isalnum())
+            if clean and len(clean) > 2:
+                clean_words.append(clean)
+        
+        if not clean_words:
+            clean_words = ["technology", "news"]
+        
+        keywords = '+'.join(clean_words)
+        
         response = requests.get(
             f"https://source.unsplash.com/featured/1200x600/?{keywords}",
             timeout=10,
@@ -147,8 +156,7 @@ def create_image_html(title):
     success = generate_image_with_sd(sd_prompt, str(image_path))
     
     if success:
-        # We need to upload the image somewhere or use base64
-        # For now, let's convert to base64 and embed
+        # Convert to base64 and embed
         try:
             with open(image_path, 'rb') as f:
                 img_data = f.read()
@@ -176,8 +184,16 @@ def create_image_html(title):
         '''
     
     # Ultimate fallback – gradient banner
+    gradients = [
+        'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+        'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
+        'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)'
+    ]
+    gradient = random.choice(gradients)
+    
     return f'''
-    <div style="margin-bottom:30px; text-align:center; background:linear-gradient(135deg,#667eea,#764ba2); padding:50px; border-radius:12px; color:white;">
+    <div style="margin-bottom:30px; text-align:center; background:{gradient}; padding:50px; border-radius:12px; color:white;">
         <span style="font-size:48px;">📰</span>
         <h2 style="color:white;">{title}</h2>
         <p>Today's featured story</p>
@@ -246,6 +262,10 @@ def post_to_blogger(title, content, labels=None):
         response = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body).execute()
         print(f"✅ Post published: {response.get('url')}")
         return True, response.get('url')
+    except HttpError as e:
+        status = e.resp.status
+        log_error("Blogger API", str(e), f"HTTP {status}")
+        return False, str(e)
     except Exception as e:
         log_error("Blogger API", str(e))
         return False, str(e)
@@ -276,7 +296,10 @@ def get_trending_topics():
         topics = [
             {'title': 'The Future of AI', 'description': 'How AI is transforming our world', 'source': 'Tech'},
             {'title': 'Climate Tech Innovations', 'description': 'Breakthroughs in green energy', 'source': 'Science'},
+            {'title': 'Space Exploration Updates', 'description': 'New missions to the Moon and Mars', 'source': 'Space'}
         ]
+    
+    random.shuffle(topics)
     return topics
 
 # ==================== GENERATE WITH OLLAMA ====================
@@ -363,6 +386,7 @@ def save_local_post(title, content):
     filename = POSTS_DIR / f"{timestamp}_{slug}.md"
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(f"# {title}\n\n{content}")
+    print(f"💾 Local backup saved: {filename}")
     return filename
 
 # ==================== MAIN ====================
@@ -374,386 +398,61 @@ def main():
 
     # Check secrets
     missing = []
-    if not BLOGGER_BLOG_ID: missing.append("BLOGGER_BLOG_ID")
-    if not GOOGLE_CLIENT_ID: missing.append("GOOGLE_CLIENT_ID")
-    if not GOOGLE_CLIENT_SECRET: missing.append("GOOGLE_CLIENT_SECRET")
-    if not GOOGLE_REFRESH_TOKEN: missing.append("GOOGLE_REFRESH_TOKEN")
+    if not BLOGGER_BLOG_ID:
+        missing.append("BLOGGER_BLOG_ID")
+    if not GOOGLE_CLIENT_ID:
+        missing.append("GOOGLE_CLIENT_ID")
+    if not GOOGLE_CLIENT_SECRET:
+        missing.append("GOOGLE_CLIENT_SECRET")
+    if not GOOGLE_REFRESH_TOKEN:
+        missing.append("GOOGLE_REFRESH_TOKEN")
     
     if missing:
-        print(f"❌ Missing: {', '.join(missing)}")
+        print(f"❌ Missing secrets: {', '.join(missing)}")
         sys.exit(1)
-    print("✅ Credentials OK")
+    print("✅ All credentials present")
 
     # Get topics
     topics = get_trending_topics()
+    if not topics:
+        print("❌ No topics available")
+        sys.exit(1)
+    
     topic = random.choice(topics)
     print(f"\n🎯 Topic: {topic['title']}")
+    print(f"📌 Source: {topic['source']}")
 
     # Generate content
     print("\n✍️ Generating content with Llama 3...")
     content = generate_blog_post(topic)
 
     # Save backup
-    local = save_local_post(topic['title'], content)
+    local_file = save_local_post(topic['title'], content)
 
     # Post with image
-    print("\n📤 Posting to Blogger...")
-    success, result = post_to_blogger(topic['title'], content)
-
-    print("\n" + "="*70)
-    if success:
-        print(f"✨ SUCCESS! {result}")
-    else:
-        print(f"⚠️ Failed: {result}")
-        print(f"📁 Backup: {local}")
-    print("="*70)
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        log_error("Main", str(e))
-        sys.exit(1)GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
-
-# Model selection – AirLLM can handle huge models!
-# Uncomment the one you want to use:
-AIRLLM_MODEL = "v2ray/Llama-3-70B"  # Llama 3 70B [citation:6]
-# AIRLLM_MODEL = "meta-llama/Llama-3.1-405B-Instruct"  # For 405B (needs 8GB)
-# AIRLLM_MODEL = "garage-bAInd/Platypus2-70B-instruct"  # Alternative 70B
-
-# ==================== SETUP ====================
-CACHE_DIR = Path(".blog-cache")
-POSTS_DIR = Path("_posts")
-CACHE_DIR.mkdir(exist_ok=True)
-POSTS_DIR.mkdir(exist_ok=True)
-
-def log_error(step, error, details=None):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n❌ ERROR at {timestamp}")
-    print(f"   Step: {step}")
-    print(f"   Error: {error}")
-    if details:
-        print(f"   Details: {details}")
-    print(f"   Traceback: {traceback.format_exc()}")
-
-# ==================== IMAGE (Unsplash) ====================
-def get_unsplash_image(topic_title):
-    try:
-        keywords = '+'.join(topic_title.split()[:3])
-        resp = requests.get(
-            f"https://source.unsplash.com/featured/1200x600/?{keywords}",
-            timeout=10,
-            allow_redirects=False
-        )
-        if resp.status_code == 302 and 'location' in resp.headers:
-            return resp.headers['location']
-    except:
-        pass
-    return None
-
-def create_image_html(title):
-    img_url = get_unsplash_image(title)
-    if img_url:
-        return f'''
-        <div style="margin-bottom:30px; text-align:center;">
-            <img src="{img_url}" alt="{title}"
-                 style="width:100%; max-width:900px; height:auto; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.15);">
-            <p style="color:#777; font-size:0.8em;">📸 Photo from Unsplash</p>
-        </div>
-        '''
-    return f'''
-    <div style="margin-bottom:30px; text-align:center; background:linear-gradient(135deg,#667eea,#764ba2); padding:50px; border-radius:12px; color:white;">
-        <span style="font-size:48px;">📰</span>
-        <h2 style="color:white;">{title}</h2>
-        <p>Today's featured story</p>
-    </div>
-    '''
-
-# ==================== BLOGGER AUTH ====================
-def get_blogger_service():
-    if not all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN]):
-        print("❌ Missing Google credentials.")
-        return None
-    try:
-        creds = Credentials(
-            token=None,
-            refresh_token=GOOGLE_REFRESH_TOKEN,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=GOOGLE_CLIENT_ID,
-            client_secret=GOOGLE_CLIENT_SECRET,
-            scopes=["https://www.googleapis.com/auth/blogger"]
-        )
-        print("🔄 Refreshing access token...")
-        creds.refresh(Request())
-        print("✅ Token refreshed.")
-        service = build('blogger', 'v3', credentials=creds)
-        blog_info = service.blogs().get(blogId=BLOGGER_BLOG_ID).execute()
-        print(f"✅ Blog verified: {blog_info.get('name')}")
-        return service
-    except Exception as e:
-        log_error("Authentication", str(e))
-        return None
-
-def post_to_blogger(title, content, labels=None):
-    if labels is None:
-        labels = ['AI Generated', 'Trending']
-    service = get_blogger_service()
-    if not service:
-        return False, "Auth failed"
-
-    image_html = create_image_html(title)
-    full_content = image_html + content
-
-    post_body = {
-        "kind": "blogger#post",
-        "title": title,
-        "content": f"""
-        <div style="font-family:'Segoe UI',Roboto,sans-serif; line-height:1.8; max-width:900px; margin:0 auto;">
-            {full_content}
-            <hr style="margin:40px 0 20px;">
-            <p style="color:#777; font-style:italic; text-align:center;">
-                Published automatically on {datetime.now().strftime('%B %d, %Y at %H:%M UTC')}
-            </p>
-        </div>
-        """,
-        "labels": labels
-    }
-
-    try:
-        response = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body).execute()
-        print(f"✅ Post published: {response.get('url')}")
-        return True, response.get('url')
-    except Exception as e:
-        log_error("Blogger API", str(e))
-        return False, str(e)
-
-# ==================== FETCH TRENDING TOPICS ====================
-def get_trending_topics():
-    topics = []
-    sources = [
-        ('https://news.ycombinator.com/rss', 'Hacker News', 5),
-        ('http://feeds.bbci.co.uk/news/rss.xml', 'BBC', 3),
-        ('https://techcrunch.com/feed/', 'TechCrunch', 3),
-        ('https://www.wired.com/feed/rss', 'Wired', 3),
-    ]
-    for url, name, lim in sources:
-        try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:lim]:
-                if entry.title and '[Removed]' not in entry.title:
-                    topics.append({
-                        'title': entry.title,
-                        'description': entry.get('summary', '')[:300],
-                        'source': name
-                    })
-        except Exception as e:
-            log_error(f"RSS {name}", str(e))
-
-    if not topics:
-        topics = [
-            {'title': 'The Rise of Generative AI', 'description': 'How AI tools are transforming creativity', 'source': 'Tech'},
-            {'title': 'Breakthroughs in Battery Technology', 'description': 'New storage solutions for renewable energy', 'source': 'Science'},
-        ]
-    random.shuffle(topics)
-    return topics
-
-# ==================== AIRLLM GENERATION (THE MAGIC!) ====================
-def generate_with_airllm(prompt, model_name=AIRLLM_MODEL):
-    """
-    Generate using AirLLM – can run 70B models on 4GB GPU!
-    Based on official AirLLM documentation [citation:5][citation:6]
-    """
-    if not AIRLLM_AVAILABLE:
-        return None, "AirLLM not installed"
-    
-    try:
-        print(f"\n🤖 Loading AirLLM model: {model_name}")
-        print("   (This may take a few minutes for first load as model is prepared layer-wise)")
-        
-        # Load model with AirLLM [citation:5]
-        MAX_LENGTH = 256
-        model = AutoModel.from_pretrained(
-            model_name,
-            compression='4bit',  # Optional: speeds up by 3x with minimal quality loss [citation:5]
-            # hf_token='YOUR_TOKEN'  # Uncomment for gated models like meta-llama/Llama-2-7b-hf
-        )
-        
-        print("✅ Model loaded successfully!")
-        
-        # Tokenize input
-        input_tokens = model.tokenizer(
-            [prompt],
-            return_tensors="pt",
-            return_attention_mask=False,
-            truncation=True,
-            max_length=MAX_LENGTH,
-            padding=False
-        )
-        
-        # Move to GPU (required for AirLLM) [citation:1]
-        input_ids = input_tokens['input_ids'].cuda()
-        
-        print("⏳ Generating with AirLLM (this may take a few minutes per request)...")
-        generation_output = model.generate(
-            input_ids,
-            max_new_tokens=800,
-            use_cache=True,
-            return_dict_in_generate=True,
-            temperature=0.8,
-            do_sample=True
-        )
-        
-        # Decode output
-        output = model.tokenizer.decode(generation_output.sequences[0])
-        
-        # Clean up prompt from output if included
-        if output.startswith(prompt):
-            output = output[len(prompt):].strip()
-        
-        print(f"✅ Generation complete ({len(output)} chars)")
-        return output, None
-        
-    except Exception as e:
-        error_msg = f"AirLLM error: {e}"
-        log_error("AirLLM Generation", str(e))
-        
-        # Check for common errors [citation:5]
-        if "MetadataIncompleteBuffer" in str(e):
-            print("💾 Disk space error! The model splitting needs more space.")
-            print("   Try clearing cache or increasing disk space.")
-        elif "401 Client Error" in str(e):
-            print("🔑 This model is gated. You need a Hugging Face token.")
-        elif "max() arg is an empty sequence" in str(e):
-            print("🔄 Wrong model class. Use AutoModel instead of specific classes.")
-        
-        return None, error_msg
-
-# ==================== FALLBACK GENERATION (phi) ====================
-def generate_fallback(prompt):
-    """Fallback to phi if AirLLM fails"""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ['/usr/local/bin/ollama', 'run', 'phi', prompt],
-            capture_output=True, text=True, timeout=120
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except:
-        pass
-    
-    # Ultimate fallback
-    return f"""
-<h2>Today's Topic</h2>
-<p>We're discussing: {prompt[:100]}...</p>
-<h2>Key Points</h2>
-<p>This topic has been generating interest recently. Staying informed helps us understand the world.</p>
-<h2>Conclusion</h2>
-<p>Thank you for reading. More updates coming soon.</p>
-"""
-
-# ==================== MAIN GENERATION FUNCTION ====================
-def generate_blog_post(topic):
-    """Try AirLLM first, fallback to phi if fails"""
-    
-    prompt = f"""Write a detailed, engaging blog post about this topic.
-
-TITLE: {topic['title']}
-DESCRIPTION: {topic['description']}
-SOURCE: {topic['source']}
-
-Instructions:
-- Write 500-700 words.
-- Start with a hook (question, fact, anecdote).
-- Use subheadings for structure.
-- Include specific examples and insights.
-- End with a conclusion that summarizes key points.
-- Be insightful and thought-provoking.
-
-POST:
-"""
-    
-    # Try AirLLM first
-    content, error = generate_with_airllm(prompt)
-    
-    if content:
-        return content
-    else:
-        print(f"\n⚠️ AirLLM failed: {error}")
-        print("🔄 Falling back to phi model...")
-        return generate_fallback(prompt)
-
-# ==================== LOCAL BACKUP ====================
-def save_local_post(title, content):
-    slug = title.lower().replace(' ', '-')[:50]
-    slug = ''.join(c for c in slug if c.isalnum() or c == '-')
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = POSTS_DIR / f"{timestamp}_{slug}.md"
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(f"# {title}\n\n{content}")
-    print(f"💾 Local backup: {filename}")
-    return filename
-
-# ==================== MAIN ====================
-def main():
-    print("="*70)
-    print("🚀 AI BLOGGER – AirLLM Edition (Running massive models!)")
-    print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📦 Model: {AIRLLM_MODEL}")
-    print("="*70)
-
-    # Check secrets
-    missing = [name for name, val in [
-        ("BLOGGER_BLOG_ID", BLOGGER_BLOG_ID),
-        ("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID),
-        ("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET),
-        ("GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN)
-    ] if not val]
-    if missing:
-        print(f"❌ Missing secrets: {', '.join(missing)}")
-        sys.exit(1)
-    print("✅ Credentials OK.")
-
-    # Get topics
-    topics = get_trending_topics()
-    if not topics:
-        print("❌ No topics.")
-        sys.exit(1)
-
-    topic = random.choice(topics)
-    print(f"\n🎯 Topic: {topic['title']} ({topic['source']})")
-
-    # Generate content
-    print("\n✍️ Generating with AirLLM (this may take 3-5 minutes)...")
-    content = generate_blog_post(topic)
-
-    # Save backup
-    local = save_local_post(topic['title'], content)
-
-    # Post to Blogger
-    print("\n📤 Posting to Blogger...")
+    print("\n📤 Posting to Blogger with Stable Diffusion image...")
     success, result = post_to_blogger(
-        topic['title'],
+        topic['title'], 
         content,
-        labels=['AI Generated', topic['source'].replace(' ', '-'), 'AirLLM']
+        labels=['AI Generated', topic['source'].replace(' ', '-'), 'StableDiffusion']
     )
 
     print("\n" + "="*70)
     if success:
-        print("✨ SUCCESS! Post published with AirLLM.")
-        print(f"📌 {result}")
+        print(f"✨ SUCCESS! Post published!")
+        print(f"📌 URL: {result}")
+        print(f"📁 Backup: {local_file}")
     else:
-        print("⚠️ Blogger failed, but backup saved.")
-        print(f"📁 {local}")
-        print(f"🔍 Error: {result}")
+        print(f"⚠️ Blogger posting failed: {result}")
+        print(f"✅ Backup saved at: {local_file}")
     print("="*70)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n⚠️ Interrupted.")
+        print("\n⚠️ Interrupted by user")
         sys.exit(0)
     except Exception as e:
-        log_error("Main", str(e))
+        log_error("Main execution", str(e))
         sys.exit(1)
