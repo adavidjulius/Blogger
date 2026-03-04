@@ -1,11 +1,11 @@
-name: Daily Blog Post to Blogger
+name: Daily Blog Post to Blogger (AirLLM)
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 8 AM
-    - cron: '0 14 * * *'  # 2 PM
-    - cron: '0 20 * * *'  # 8 PM
-  workflow_dispatch:
+    - cron: '0 8 * * *'   # 8 AM UTC
+    - cron: '0 14 * * *'  # 2 PM UTC
+    - cron: '0 20 * * *'  # 8 PM UTC
+  workflow_dispatch:       # Manual trigger
 
 jobs:
   generate-and-post:
@@ -18,23 +18,62 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
           cache: 'pip'
 
-      - name: Cache Ollama
-        id: cache-ollama
+      # Cache AirLLM model layers to avoid re-downloading
+      - name: Cache AirLLM models
         uses: actions/cache@v3
         with:
-          path: |
-            ~/.ollama
-            /usr/local/bin/ollama
-          key: ${{ runner.os }}-ollama
+          path: ~/.cache/airllm
+          key: airllm-${{ runner.os }}-${{ hashFiles('scripts/generate_post.py') }}
+          restore-keys: |
+            airllm-${{ runner.os }}-
 
-      - name: Install Ollama (if not cached)
-        if: steps.cache-ollama.outputs.cache-hit != 'true'
+      # Install system dependencies (if any needed for AirLLM)
+      - name: Install system dependencies
         run: |
-          curl -fsSL https://ollama.com/install.sh | sh
-          echo "Ollama installed"
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      # Install Python packages with CUDA support
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          # Install PyTorch with CUDA (GitHub runners have CUDA 11.8)
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+          # Install AirLLM and other requirements
+          pip install airllm feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+
+      # Optional: Set Hugging Face token if using gated models (like meta-llama/Llama-2-7b-hf)
+      # You must add HF_TOKEN to your GitHub secrets
+      - name: Set Hugging Face token (if needed)
+        run: |
+          if [ -n "${{ secrets.HF_TOKEN }}" ]; then
+            echo "HF_TOKEN=${{ secrets.HF_TOKEN }}" >> $GITHUB_ENV
+          fi
+        shell: bash
+
+      # Run the generation and posting script
+      - name: Generate and post to Blogger
+        env:
+          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          # Optional: pass HF_TOKEN if needed
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          mkdir -p .blog-cache _posts
+          python scripts/generate_post.py
+
+      # Upload the generated post as an artifact (backup)
+      - name: Upload post artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blog-post-${{ github.run_id }}
+          path: _posts/*.md          echo "Ollama installed"
 
       - name: Start Ollama service
         run: |
