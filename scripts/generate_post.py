@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster – Clean Long Form + Reliable Images
-- Extracts image from RSS (if available)
-- Falls back to Unsplash → Picsum → Gradient banner
-- Generates 3000-4000 words with clean formatting (no extra commentary)
-- Adds logo at bottom
+Blogger Auto-Poster – Long Form + RSS Images + Logo
+- Generates 3000-4000 words per post
+- Extracts image from RSS feed (if available)
+- Falls back to Unsplash → Picsum → gradient banner
+- Adds your logo at the bottom (base64 encoded)
+- Designed to run multiple times per day (NUM_POSTS_PER_DAY = 1)
 """
 
 import os
@@ -15,7 +16,6 @@ import random
 import subprocess
 import traceback
 import urllib.parse
-import time
 import base64
 from datetime import datetime
 from pathlib import Path
@@ -52,7 +52,7 @@ def log_error(step, error, details=None):
         print(f"   Details: {details}")
     print(f"   Traceback: {traceback.format_exc()}")
 
-# ==================== IMAGE FETCHING (MULTI‑LAYER FALLBACK) ====================
+# ==================== IMAGE FETCHING ====================
 def extract_rss_image(entry):
     """Extract image URL from RSS entry (media:content, enclosure, etc.)"""
     if hasattr(entry, 'media_content') and entry.media_content:
@@ -91,7 +91,7 @@ def get_picsum_url():
 def get_image_url(entry, title):
     """Main image function: RSS → Unsplash → Picsum → None"""
     # 1. Try RSS
-    url = extract_rss_image(entry)
+    url = extract_rss_image(entry) if entry else None
     if url:
         print(f"🖼️ RSS image found")
         return url
@@ -277,7 +277,7 @@ def save_local_post(title, content):
 # ==================== MAIN ====================
 def main():
     print("="*70)
-    print("🚀 AI BLOGGER – Clean Long Form + Multi‑layer Images")
+    print("🚀 AI BLOGGER – Long Form + RSS Images + Logo")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
