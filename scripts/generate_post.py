@@ -262,7 +262,7 @@ Structure:
 - Then several <h2> sections (at least 4) with detailed analysis, examples, implications
 - End with <h2>Conclusion</h2>
 
-Length: 3000-4000 words. Write in clear, engaging prose. Use <h2> for headings, <p> for paragraphs. Do not include any meta comments like "Here's a post..." – just the post itself.
+Length: 2000-3000 words. Write in clear, engaging prose. Use <h2> for headings, <p> for paragraphs. Do not include any meta comments like "Here's a post..." – just the post itself.
 """
     return generate_with_ollama(prompt)
 
