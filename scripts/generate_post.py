@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster – Long Form + RSS Images + Logo
+Blogger Auto-Poster – Long Form + RSS Images + Centered Logo
 - Generates 3000-4000 words per post
 - Extracts image from RSS feed (if available)
 - Falls back to Unsplash → Picsum → gradient banner
-- Adds your logo at the bottom (base64 encoded)
-- Designed to run multiple times per day (NUM_POSTS_PER_DAY = 1)
+- Adds your logo centered at the bottom (base64 encoded)
 """
 
 import os
@@ -122,7 +121,7 @@ def create_image_html(img_url, title):
     </div>
     '''
 
-# ==================== LOGO ====================
+# ==================== LOGO (CENTERED) ====================
 def get_logo_base64():
     if not LOGO_PATH.exists():
         return None
@@ -138,8 +137,8 @@ def create_logo_html():
         return ''
     return f'''
     <div style="margin-top:40px; text-align:center; padding:20px; border-top:1px solid #eaeaea;">
-        <img src="data:image/png;base64,{b64}" alt="Logo" style="max-width:200px;">
-        <p style="color:#777;">© {datetime.now().year} ReadContext</p>
+        <img src="data:image/png;base64,{b64}" alt="Logo" style="max-width:200px; margin:0 auto; display:block;">
+        <p style="color:#777; margin-top:10px;">© {datetime.now().year} ReadContext</p>
     </div>
     '''
 
@@ -217,7 +216,7 @@ def get_trending_topics():
     random.shuffle(topics)
     return topics
 
-# ==================== GENERATION (CLEAN PROMPT) ====================
+# ==================== GENERATION ====================
 def generate_with_ollama(prompt, model=PRIMARY_MODEL):
     # Try API
     try:
@@ -248,7 +247,6 @@ def generate_with_ollama(prompt, model=PRIMARY_MODEL):
     return None
 
 def generate_blog_post(topic):
-    """Prompt that asks only for the post body, no extra text."""
     prompt = f"""Write a detailed, long-form blog post about the following topic. Output only the post content, no additional commentary.
 
 TITLE: {topic['title']}
@@ -262,7 +260,7 @@ Structure:
 - Then several <h2> sections (at least 4) with detailed analysis, examples, implications
 - End with <h2>Conclusion</h2>
 
-Length: 2000-3000 words. Write in clear, engaging prose. Use <h2> for headings, <p> for paragraphs. Do not include any meta comments like "Here's a post..." – just the post itself.
+Length: 3000-4000 words. Write in clear, engaging prose. Use <h2> for headings, <p> for paragraphs. Do not include any meta comments like "Here's a post..." – just the post itself.
 """
     return generate_with_ollama(prompt)
 
@@ -277,7 +275,7 @@ def save_local_post(title, content):
 # ==================== MAIN ====================
 def main():
     print("="*70)
-    print("🚀 AI BLOGGER – Long Form + RSS Images + Logo")
+    print("🚀 AI BLOGGER – Long Form + RSS Images + Centered Logo")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
@@ -297,7 +295,7 @@ def main():
     topic = random.choice(topics)
     print(f"\n🎯 Topic: {topic['title']} ({topic['source']})")
 
-    # Get image (RSS → Unsplash → Picsum → None)
+    # Get image
     img_url = get_image_url(topic.get('entry'), topic['title'])
     if img_url:
         print(f"✅ Image obtained")
