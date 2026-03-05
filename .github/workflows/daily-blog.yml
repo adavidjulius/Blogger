@@ -2,9 +2,12 @@ name: Daily Blog Post to Blogger
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 8 AM UTC
-    - cron: '0 14 * * *'  # 2 PM UTC
-    - cron: '0 20 * * *'  # 8 PM UTC
+    - cron: '30 3 * * *'   # 03:30 UTC
+    - cron: '0 7 * * *'    # 07:00 UTC
+    - cron: '30 12 * * *'  # 12:30 UTC
+    - cron: '0 13 * * *'   # 13:00 UTC
+    - cron: '30 16 * * *'  # 16:30 UTC
+    - cron: '0 19 * * *'   # 19:00 UTC
   workflow_dispatch:
 
 jobs:
@@ -18,10 +21,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
           cache: 'pip'
 
-      # Cache Ollama to avoid re-downloading models
+      # Cache Ollama models to speed up runs
       - name: Cache Ollama
         id: cache-ollama
         uses: actions/cache@v3
@@ -69,7 +72,7 @@ jobs:
           mkdir -p .blog-cache _posts
           python scripts/generate_post.py
 
-      - name: Upload post artifact (backup)
+      - name: Upload post artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
