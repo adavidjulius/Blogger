@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster – AirLLM Edition (13B/7B on CPU)
-- Uses AirLLM to run large models (13B recommended, 7B as fallback).
-- Falls back to Ollama (llama3:8b / phi) if AirLLM fails.
-- All existing SEO & image features preserved.
+Blogger Auto-Poster – AirLLM Edition (13B/7B on CPU) – FINAL FIXED VERSION
+- Auto-detects working sitemap URL for Google ping
+- Improved Search Console error handling
+- Falls back to Ollama (llama3:8b / phi) if AirLLM fails
+- All existing SEO & image features preserved
 """
 
 import os
@@ -28,13 +29,12 @@ from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-# AirLLM – if not installed, we'll know
+# AirLLM – optional
 try:
     from airllm import AutoModel
     AIRLLM_AVAILABLE = True
 except ImportError:
     AIRLLM_AVAILABLE = False
-    print("⚠️ AirLLM not installed – will use Ollama only.")
 
 # ==================== CONFIG ====================
 BLOGGER_BLOG_ID = os.getenv("BLOGGER_BLOG_ID")
@@ -43,15 +43,22 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 GSC_SERVICE_ACCOUNT_JSON = os.getenv("GSC_SERVICE_ACCOUNT_JSON")
 
-# Model selection – change as desired
-# AIRLLM_MODEL = "v2ray/Llama-2-13B"          # 13B (needs ~13GB RAM, may be heavy)
-AIRLLM_MODEL = "v2ray/Llama-2-7B"             # 7B – safer for GitHub runner
-OLLAMA_PRIMARY = "llama3:8b"                   # Ollama model (good quality)
-OLLAMA_FALLBACK = "phi"                         # Tiny fallback
+# Model selection – 7B is safer on GitHub runners
+AIRLLM_MODEL = "v2ray/Llama-2-7B"          # 7B – works on CPU with ~6GB RAM
+# AIRLLM_MODEL = "v2ray/Llama-2-13B"        # 13B – may exceed memory, use cautiously
+OLLAMA_PRIMARY = "llama3:8b"
+OLLAMA_FALLBACK = "phi"
 
 LOGO_PATH = Path("logo.png")
 BLOG_URL = "https://readcontext.blogspot.com"
-SITEMAP_URL = f"{BLOG_URL}/sitemap.xml"
+
+# We'll auto-detect the correct sitemap URL
+SITEMAP_CANDIDATES = [
+    f"{BLOG_URL}/sitemap.xml",
+    f"{BLOG_URL}/atom.xml?redirect=false&start-index=1&max-results=500",
+    f"{BLOG_URL}/feeds/posts/default",
+]
+SITEMAP_URL = None  # will be set by test_sitemap()
 
 # ==================== SETUP ====================
 CACHE_DIR = Path(".blog-cache")
@@ -74,6 +81,22 @@ def log_error(step, error, details=None):
     if details:
         print(f"   Details: {details}")
     print(f"   Traceback: {traceback.format_exc()}")
+
+def test_sitemap():
+    """Find a working sitemap URL by trying candidates."""
+    global SITEMAP_URL
+    for url in SITEMAP_CANDIDATES:
+        try:
+            r = requests.head(url, timeout=5, allow_redirects=True)
+            if r.status_code == 200:
+                SITEMAP_URL = url
+                print(f"✅ Using sitemap: {url}")
+                return
+        except:
+            continue
+    # Fallback to the first candidate (will be used anyway)
+    SITEMAP_URL = SITEMAP_CANDIDATES[0]
+    print(f"⚠️ No working sitemap found, using default: {SITEMAP_URL}")
 
 # ==================== IMAGE FETCHING ====================
 def extract_rss_image(entry):
@@ -174,13 +197,16 @@ def get_related_posts_html(current_title, max_links=3):
 
 # ==================== PING GOOGLE ====================
 def ping_google():
+    global SITEMAP_URL
+    if not SITEMAP_URL:
+        test_sitemap()
     try:
         ping_url = f"https://www.google.com/ping?sitemap={SITEMAP_URL}"
         r = requests.get(ping_url, timeout=10)
         if r.status_code == 200:
             print("✅ Google pinged successfully")
         else:
-            print(f"⚠️ Google ping returned {r.status_code}")
+            print(f"⚠️ Google ping returned {r.status_code} – check sitemap URL: {SITEMAP_URL}")
     except Exception as e:
         log_error("Google Ping", str(e))
 
@@ -190,7 +216,11 @@ def submit_to_search_console(post_url):
         print("⚠️ GSC_SERVICE_ACCOUNT_JSON not set – skipping Search Console submission.")
         return False
     try:
-        service_account_info = json.loads(GSC_SERVICE_ACCOUNT_JSON)
+        # Clean the JSON string (remove any extra quotes)
+        json_str = GSC_SERVICE_ACCOUNT_JSON.strip()
+        if json_str.startswith('"') and json_str.endswith('"'):
+            json_str = json_str[1:-1].replace('\\"', '"')
+        service_account_info = json.loads(json_str)
         credentials = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=["https://www.googleapis.com/auth/indexing"]
@@ -215,8 +245,15 @@ def submit_to_search_console(post_url):
             print("✅ Submitted to Google Search Console via Service Account")
             return True
         else:
-            print(f"⚠️ Search Console API error: {resp.status_code} {resp.text}")
+            error_body = resp.text
+            print(f"⚠️ Search Console API error: {resp.status_code} {error_body}")
+            if resp.status_code == 401:
+                print("   🔑 Ensure the service account email is added as an owner in Search Console.")
             return False
+    except json.JSONDecodeError as e:
+        log_error("Search Console JSON parse", str(e))
+        print("   🔧 Check that GSC_SERVICE_ACCOUNT_JSON contains the entire JSON key (including braces).")
+        return False
     except Exception as e:
         log_error("Search Console API", str(e))
         return False
@@ -313,7 +350,6 @@ def get_trending_topics():
 # ==================== AIRLLM GENERATION ====================
 def generate_with_airllm(prompt, model_name=AIRLLM_MODEL):
     if not AIRLLM_AVAILABLE:
-        print("⚠️ AirLLM not available.")
         return None
     try:
         print(f"🤖 Loading AirLLM model {model_name}...")
@@ -425,8 +461,11 @@ def save_local_post(title, content, summary):
 
 # ==================== MAIN ====================
 def main():
+    # Find working sitemap URL at start
+    test_sitemap()
+
     print("="*70)
-    print("🚀 AI BLOGGER – AirLLM Edition (13B/7B on CPU)")
+    print("🚀 AI BLOGGER – AirLLM Edition (13B/7B on CPU) – FINAL FIXED")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
