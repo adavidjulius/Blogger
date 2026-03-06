@@ -1,50 +1,84 @@
-name: Daily Blog Post
+name: Daily Blog Post to Blogger (AirLLM Edition)
 
 on:
   schedule:
-    - cron: '30 3 * * *'
-    - cron: '0 7 * * *'
-    - cron: '30 12 * * *'
-    - cron: '0 13 * * *'
-    - cron: '30 16 * * *'
-    - cron: '0 19 * * *'
+    - cron: '30 3 * * *'   # 03:30 UTC (09:00 IST)
+    - cron: '0 7 * * *'    # 07:00 UTC (12:30 IST)
+    - cron: '30 12 * * *'  # 12:30 UTC (18:00 IST)
+    - cron: '0 13 * * *'   # 13:00 UTC (18:30 IST)
+    - cron: '30 16 * * *'  # 16:30 UTC (22:00 IST)
+    - cron: '0 19 * * *'   # 19:00 UTC (00:30 IST)
   workflow_dispatch:
 
 jobs:
   generate-and-post:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360  # 6 hours max per run
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
+
+      # Cache Ollama (binaries and models)
       - name: Cache Ollama
         id: cache-ollama
         uses: actions/cache@v3
         with:
-          path: ~/.ollama
+          path: |
+            ~/.ollama
+            /usr/local/bin/ollama
           key: ${{ runner.os }}-ollama
-      - name: Install Ollama
+
+      - name: Install Ollama (if not cached)
         if: steps.cache-ollama.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           echo "/usr/local/bin" >> $GITHUB_PATH
-      - name: Start Ollama
+
+      - name: Start Ollama service
         run: |
-          ollama serve &
+          /usr/local/bin/ollama serve &
           sleep 10
+          # Wait for Ollama to be ready
           for i in {1..10}; do
-            curl -s http://localhost:11434/api/tags && break || sleep 3
+            if curl -s http://localhost:11434/api/tags > /dev/null; then
+              echo "✅ Ollama ready"
+              break
+            fi
+            echo "Waiting for Ollama... ($i/10)"
+            sleep 3
           done
-      - name: Pull phi
-        run: ollama pull phi
-      - name: Install Python deps
+
+      - name: Pull Ollama fallback models
+        run: |
+          /usr/local/bin/ollama pull phi
+          /usr/local/bin/ollama pull llama3:8b || true   # optional, can be used if you modify script
+
+      # Cache AirLLM models
+      - name: Cache AirLLM
+        id: cache-airllm
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/airllm
+          key: ${{ runner.os }}-airllm-${{ hashFiles('scripts/generate_post.py') }}
+          restore-keys: |
+            ${{ runner.os }}-airllm-
+
+      # Install Python dependencies
+      - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pillow
-      - name: Generate and post
+          # PyTorch with CUDA support (falls back to CPU)
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+          pip install airllm feedparser requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pillow
+
+      - name: Generate and post to Blogger
         env:
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -54,7 +88,8 @@ jobs:
         run: |
           mkdir -p .blog-cache _posts
           python scripts/generate_post.py
-      - name: Upload artifact
+
+      - name: Upload post artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
