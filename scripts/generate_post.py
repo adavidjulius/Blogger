@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster – Long Form + RSS Images + Centered Logo
-- Generates 3000-4000 words per post
-- Extracts image from RSS feed (if available)
-- Falls back to Unsplash → Picsum → gradient banner
-- Adds your logo centered at the bottom (base64 encoded)
+Blogger Auto-Poster – Long Form + All SEO Upgrades
+- 3000-4000 word posts with summary
+- RSS/Unsplash/Picsum images + centered logo
+- Internal linking to previous posts
+- Meta description (from summary)
+- Google ping after each post
+- Google Search Console submission via Service Account (Indexing API)
 """
 
 import os
@@ -16,11 +18,13 @@ import subprocess
 import traceback
 import urllib.parse
 import base64
+import json
 from datetime import datetime
 from pathlib import Path
 
-# Google API
+# Google APIs
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
@@ -32,15 +36,27 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 
+# Search Console service account (new)
+GSC_SERVICE_ACCOUNT_JSON = os.getenv("GSC_SERVICE_ACCOUNT_JSON")
+
 PRIMARY_MODEL = "llama3:8b"
 FALLBACK_MODEL = "phi"
 LOGO_PATH = Path("logo.png")
+BLOG_URL = "https://readcontext.blogspot.com"  # Replace with your actual blog URL
+SITEMAP_URL = f"{BLOG_URL}/sitemap.xml"
 
 # ==================== SETUP ====================
 CACHE_DIR = Path(".blog-cache")
 POSTS_DIR = Path("_posts")
 CACHE_DIR.mkdir(exist_ok=True)
 POSTS_DIR.mkdir(exist_ok=True)
+
+POSTS_LOG = CACHE_DIR / "posts_log.json"
+if POSTS_LOG.exists():
+    with open(POSTS_LOG, 'r') as f:
+        posts_log = json.load(f)
+else:
+    posts_log = []
 
 def log_error(step, error, details=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -53,7 +69,6 @@ def log_error(step, error, details=None):
 
 # ==================== IMAGE FETCHING ====================
 def extract_rss_image(entry):
-    """Extract image URL from RSS entry (media:content, enclosure, etc.)"""
     if hasattr(entry, 'media_content') and entry.media_content:
         for m in entry.media_content:
             if 'url' in m:
@@ -69,7 +84,6 @@ def extract_rss_image(entry):
     return None
 
 def get_unsplash_url(keywords):
-    """Try Unsplash (returns redirect URL)"""
     try:
         kw = '+'.join(keywords.split()[:3])
         resp = requests.get(
@@ -84,28 +98,22 @@ def get_unsplash_url(keywords):
     return None
 
 def get_picsum_url():
-    """Picsum – always returns a random image (no keywords)"""
     return f"https://picsum.photos/1200/600?random={random.randint(1,100000)}"
 
 def get_image_url(entry, title):
-    """Main image function: RSS → Unsplash → Picsum → None"""
-    # 1. Try RSS
     url = extract_rss_image(entry) if entry else None
     if url:
         print(f"🖼️ RSS image found")
         return url
-    # 2. Try Unsplash
     url = get_unsplash_url(title)
     if url:
         print(f"🖼️ Unsplash image found")
         return url
-    # 3. Try Picsum (always works)
     print(f"🖼️ Using Picsum placeholder")
     return get_picsum_url()
 
 def create_image_html(img_url, title):
     if not img_url:
-        # Ultimate fallback – gradient banner
         return f'''
         <div style="margin-bottom:30px; text-align:center; background:linear-gradient(135deg,#667eea,#764ba2); padding:50px; border-radius:12px; color:white;">
             <span style="font-size:48px;">📰</span>
@@ -142,9 +150,76 @@ def create_logo_html():
     </div>
     '''
 
-# ==================== BLOGGER ====================
+# ==================== INTERNAL LINKING ====================
+def get_related_posts_html(current_title, max_links=3):
+    if not posts_log:
+        return ""
+    candidates = [p for p in posts_log if p['title'] != current_title]
+    if len(candidates) < 1:
+        return ""
+    selected = random.sample(candidates, min(max_links, len(candidates)))
+    html = '<h2>📚 Related Posts</h2><ul style="list-style:none; padding:0;">'
+    for p in selected:
+        html += f'<li style="margin-bottom:10px;"><a href="{p["url"]}" style="text-decoration:none; color:#F36C21;">{p["title"]}</a></li>'
+    html += '</ul>'
+    return html
+
+# ==================== PING GOOGLE ====================
+def ping_google():
+    try:
+        ping_url = f"https://www.google.com/ping?sitemap={SITEMAP_URL}"
+        r = requests.get(ping_url, timeout=10)
+        if r.status_code == 200:
+            print("✅ Google pinged successfully")
+        else:
+            print(f"⚠️ Google ping returned {r.status_code}")
+    except Exception as e:
+        log_error("Google Ping", str(e))
+
+# ==================== SEARCH CONSOLE (SERVICE ACCOUNT) ====================
+def submit_to_search_console(post_url):
+    if not GSC_SERVICE_ACCOUNT_JSON:
+        print("⚠️ GSC_SERVICE_ACCOUNT_JSON not set – skipping Search Console submission.")
+        return False
+    try:
+        # Parse the JSON secret
+        service_account_info = json.loads(GSC_SERVICE_ACCOUNT_JSON)
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=["https://www.googleapis.com/auth/indexing"]
+        )
+        # Use the Indexing API endpoint
+        headers = {
+            "Authorization": f"Bearer {credentials.token}",
+            "Content-Type": "application/json"
+        }
+        # Refresh token if needed (service account handles automatically)
+        if not credentials.valid:
+            credentials.refresh(Request())
+        data = {
+            "url": post_url,
+            "type": "URL_UPDATED"
+        }
+        resp = requests.post(
+            "https://indexing.googleapis.com/v3/urlNotifications:publish",
+            headers=headers,
+            json=data,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            print("✅ Submitted to Google Search Console via Service Account")
+            return True
+        else:
+            print(f"⚠️ Search Console API error: {resp.status_code} {resp.text}")
+            return False
+    except Exception as e:
+        log_error("Search Console API (Service Account)", str(e))
+        return False
+
+# ==================== BLOGGER AUTH ====================
 def get_blogger_service():
     if not all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN]):
+        print("❌ Missing Google Blogger credentials.")
         return None
     try:
         creds = Credentials(
@@ -156,19 +231,23 @@ def get_blogger_service():
             scopes=["https://www.googleapis.com/auth/blogger"]
         )
         creds.refresh(Request())
-        return build('blogger', 'v3', credentials=creds)
+        service = build('blogger', 'v3', credentials=creds)
+        blog_info = service.blogs().get(blogId=BLOGGER_BLOG_ID).execute()
+        print(f"✅ Blog verified: {blog_info.get('name')}")
+        return service
     except Exception as e:
         log_error("Blogger Auth", str(e))
         return None
 
-def post_to_blogger(title, content, img_url, labels):
+def post_to_blogger(title, content, meta_description, img_url, labels):
     service = get_blogger_service()
     if not service:
         return False, "Auth failed"
 
     image_html = create_image_html(img_url, title)
+    related_html = get_related_posts_html(title)
     logo_html = create_logo_html()
-    full_content = image_html + content + logo_html
+    full_content = image_html + content + related_html + logo_html
 
     post_body = {
         "kind": "blogger#post",
@@ -180,12 +259,23 @@ def post_to_blogger(title, content, img_url, labels):
             <p style="color:#777; text-align:center;">Published on {datetime.now().strftime('%B %d, %Y at %H:%M UTC')}</p>
         </div>
         """,
-        "labels": labels
+        "labels": labels,
+        "metaDescription": meta_description[:160] if meta_description else None
     }
 
     try:
         res = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body).execute()
-        return True, res.get('url')
+        post_url = res.get('url')
+        print(f"✅ Post published: {post_url}")
+        # Save to log
+        posts_log.append({
+            "title": title,
+            "url": post_url,
+            "date": datetime.now().isoformat()
+        })
+        with open(POSTS_LOG, 'w') as f:
+            json.dump(posts_log[-100:], f, indent=2)
+        return True, post_url
     except Exception as e:
         log_error("Blogger API", str(e))
         return False, str(e)
@@ -218,7 +308,6 @@ def get_trending_topics():
 
 # ==================== GENERATION ====================
 def generate_with_ollama(prompt, model=PRIMARY_MODEL):
-    # Try API
     try:
         resp = requests.post('http://localhost:11434/api/generate',
                               json={
@@ -234,7 +323,6 @@ def generate_with_ollama(prompt, model=PRIMARY_MODEL):
                 return content
     except:
         pass
-    # Try CLI
     try:
         result = subprocess.run(['/usr/local/bin/ollama', 'run', model, prompt],
                                 capture_output=True, text=True, timeout=600)
@@ -247,35 +335,52 @@ def generate_with_ollama(prompt, model=PRIMARY_MODEL):
     return None
 
 def generate_blog_post(topic):
-    prompt = f"""Write a detailed, long-form blog post about the following topic. Output only the post content, no additional commentary.
+    prompt = f"""Write a detailed, long-form blog post about the following topic. 
+First, output a one-paragraph summary (max 200 words) that captures the essence of the post.
+Then, after the summary, write the full post.
 
 TITLE: {topic['title']}
 DESCRIPTION: {topic['description']}
 SOURCE: {topic['source']}
 
-Structure:
+FORMAT:
+SUMMARY: <your summary here>
+
+Then the post with the following structure:
 - Start with an <h1> title (the given title)
-- Then an <h2>Synopsis</h2> (2-3 paragraph summary)
-- Then <h2>Introduction</h2>
+- Then an <h2>Introduction</h2>
 - Then several <h2> sections (at least 4) with detailed analysis, examples, implications
 - End with <h2>Conclusion</h2>
 
-Length: 3000-4000 words. Write in clear, engaging prose. Use <h2> for headings, <p> for paragraphs. Do not include any meta comments like "Here's a post..." – just the post itself.
+Length: 3000-4000 words. Write in clear, engaging prose. Use <h2> for headings, <p> for paragraphs.
 """
-    return generate_with_ollama(prompt)
+    output = generate_with_ollama(prompt)
+    if not output:
+        return None, None
+    # Extract summary
+    if "SUMMARY:" in output:
+        parts = output.split("SUMMARY:", 1)
+        summary_and_rest = parts[1].strip()
+        lines = summary_and_rest.split("\n\n", 1)
+        summary = lines[0].strip()
+        content = lines[1] if len(lines) > 1 else ""
+    else:
+        summary = output[:200]
+        content = output
+    return content.strip(), summary.strip()
 
-def save_local_post(title, content):
+def save_local_post(title, content, summary):
     slug = title.lower().replace(' ', '-')[:50]
     slug = ''.join(c for c in slug if c.isalnum() or c == '-')
     fname = POSTS_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{slug}.md"
     with open(fname, 'w') as f:
-        f.write(f"# {title}\n\n{content}")
+        f.write(f"# {title}\n\n## Summary\n{summary}\n\n{content}")
     return fname
 
 # ==================== MAIN ====================
 def main():
     print("="*70)
-    print("🚀 AI BLOGGER – Long Form + RSS Images + Centered Logo")
+    print("🚀 AI BLOGGER – Full SEO Suite (Service Account)")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
@@ -284,7 +389,7 @@ def main():
                                ('GOOGLE_CLIENT_SECRET', GOOGLE_CLIENT_SECRET),
                                ('GOOGLE_REFRESH_TOKEN', GOOGLE_REFRESH_TOKEN)] if not v]
     if missing:
-        print(f"❌ Missing secrets: {', '.join(missing)}")
+        print(f"❌ Missing Blogger secrets: {', '.join(missing)}")
         sys.exit(1)
 
     topics = get_trending_topics()
@@ -295,35 +400,45 @@ def main():
     topic = random.choice(topics)
     print(f"\n🎯 Topic: {topic['title']} ({topic['source']})")
 
-    # Get image
     img_url = get_image_url(topic.get('entry'), topic['title'])
     if img_url:
         print(f"✅ Image obtained")
     else:
         print("⚠️ No image, using gradient fallback")
 
-    # Generate content
-    print("\n✍️ Generating long content (3000-4000 words)...")
-    content = generate_blog_post(topic)
+    print("\n✍️ Generating long content...")
+    content, summary = generate_blog_post(topic)
     if not content:
         print("❌ Generation failed")
         sys.exit(1)
     print(f"✅ Generated {len(content)} chars")
+    print(f"📝 Summary: {summary[:100]}...")
 
-    # Local backup
-    local = save_local_post(topic['title'], content)
+    local = save_local_post(topic['title'], content, summary)
 
-    # Post to Blogger
     print("\n📤 Posting to Blogger...")
-    ok, url = post_to_blogger(topic['title'], content, img_url,
-                               ['AI Generated', topic['source'].replace(' ', '-'), 'LongForm'])
+    ok, url = post_to_blogger(
+        topic['title'],
+        content,
+        summary,
+        img_url,
+        ['AI Generated', topic['source'].replace(' ', '-'), 'LongForm']
+    )
 
-    print("\n" + "="*70)
     if ok:
-        print(f"✨ SUCCESS!\n📌 {url}")
+        print("\n🔔 Pinging Google...")
+        ping_google()
+
+        if GSC_SERVICE_ACCOUNT_JSON:
+            print("\n📤 Submitting to Google Search Console via Service Account...")
+            submit_to_search_console(url)
+        else:
+            print("ℹ️ No GSC_SERVICE_ACCOUNT_JSON secret – skipping Search Console submission.")
+
+        print(f"\n✨ SUCCESS! Post published: {url}")
+        print(f"📁 Backup: {local}")
     else:
-        print(f"⚠️ Failed: {url}\n✅ Backup: {local}")
-    print("="*70)
+        print(f"\n❌ Failed to publish: {url}\nBackup saved at {local}")
 
 if __name__ == "__main__":
     try:
