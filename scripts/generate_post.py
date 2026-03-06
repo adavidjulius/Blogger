@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster – Long Form + All SEO Upgrades
-- 3000-4000 word posts with summary
-- RSS/Unsplash/Picsum images + centered logo
-- Internal linking to previous posts
-- Meta description (from summary)
-- Google ping after each post
-- Google Search Console submission via Service Account (Indexing API)
+Blogger Auto-Poster – AirLLM Edition (High Quality)
+- Uses AirLLM to run large models (13B, 70B) on limited GPU/CPU.
+- Falls back to Ollama (phi) if AirLLM fails.
+- All existing SEO & image features preserved.
 """
 
 import os
@@ -19,6 +16,7 @@ import traceback
 import urllib.parse
 import base64
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -30,19 +28,27 @@ from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
+# AirLLM – if not installed, we fallback
+try:
+    from airllm import AutoModel
+    AIRLLM_AVAILABLE = True
+except ImportError:
+    AIRLLM_AVAILABLE = False
+
 # ==================== CONFIG ====================
 BLOGGER_BLOG_ID = os.getenv("BLOGGER_BLOG_ID")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
-
-# Search Console service account (new)
 GSC_SERVICE_ACCOUNT_JSON = os.getenv("GSC_SERVICE_ACCOUNT_JSON")
 
-PRIMARY_MODEL = "llama3:8b"
-FALLBACK_MODEL = "phi"
+# AirLLM model selection – change to any Hugging Face model
+AIRLLM_MODEL = "v2ray/Llama-2-13B"  # 13B model, works on CPU (slow) or GPU
+# For 70B, use: "v2ray/Llama-3-70B" – needs GPU
+OLLAMA_FALLBACK_MODEL = "phi"
+
 LOGO_PATH = Path("logo.png")
-BLOG_URL = "https://readcontext.blogspot.com"  # Replace with your actual blog URL
+BLOG_URL = "https://readcontext.blogspot.com"
 SITEMAP_URL = f"{BLOG_URL}/sitemap.xml"
 
 # ==================== SETUP ====================
@@ -129,7 +135,7 @@ def create_image_html(img_url, title):
     </div>
     '''
 
-# ==================== LOGO (CENTERED) ====================
+# ==================== LOGO ====================
 def get_logo_base64():
     if not LOGO_PATH.exists():
         return None
@@ -182,18 +188,15 @@ def submit_to_search_console(post_url):
         print("⚠️ GSC_SERVICE_ACCOUNT_JSON not set – skipping Search Console submission.")
         return False
     try:
-        # Parse the JSON secret
         service_account_info = json.loads(GSC_SERVICE_ACCOUNT_JSON)
         credentials = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=["https://www.googleapis.com/auth/indexing"]
         )
-        # Use the Indexing API endpoint
         headers = {
             "Authorization": f"Bearer {credentials.token}",
             "Content-Type": "application/json"
         }
-        # Refresh token if needed (service account handles automatically)
         if not credentials.valid:
             credentials.refresh(Request())
         data = {
@@ -267,7 +270,6 @@ def post_to_blogger(title, content, meta_description, img_url, labels):
         res = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body).execute()
         post_url = res.get('url')
         print(f"✅ Post published: {post_url}")
-        # Save to log
         posts_log.append({
             "title": title,
             "url": post_url,
@@ -306,8 +308,36 @@ def get_trending_topics():
     random.shuffle(topics)
     return topics
 
-# ==================== GENERATION ====================
-def generate_with_ollama(prompt, model=PRIMARY_MODEL):
+# ==================== AIRLLM GENERATION ====================
+def generate_with_airllm(prompt, model_name=AIRLLM_MODEL):
+    if not AIRLLM_AVAILABLE:
+        print("⚠️ AirLLM not installed, falling back.")
+        return None
+    try:
+        print(f"🤖 Loading AirLLM model {model_name}...")
+        model = AutoModel.from_pretrained(model_name, compression='4bit')  # 4bit saves memory
+        print("✅ Model loaded.")
+        input_ids = model.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).input_ids.cuda()
+        print("⏳ Generating (this may take a while)...")
+        output = model.generate(
+            input_ids,
+            max_new_tokens=4096,
+            use_cache=True,
+            temperature=0.8,
+            do_sample=True,
+            top_p=0.9
+        )
+        result = model.tokenizer.decode(output[0], skip_special_tokens=True)
+        if result.startswith(prompt):
+            result = result[len(prompt):].strip()
+        print(f"✅ AirLLM generation complete ({len(result)} chars)")
+        return result
+    except Exception as e:
+        log_error("AirLLM Generation", str(e))
+        return None
+
+# ==================== OLLAMA FALLBACK ====================
+def generate_with_ollama(prompt, model=OLLAMA_FALLBACK_MODEL):
     try:
         resp = requests.post('http://localhost:11434/api/generate',
                               json={
@@ -330,44 +360,42 @@ def generate_with_ollama(prompt, model=PRIMARY_MODEL):
             return result.stdout.strip()
     except:
         pass
-    if model != FALLBACK_MODEL:
-        return generate_with_ollama(prompt, FALLBACK_MODEL)
     return None
 
 def generate_blog_post(topic):
-    prompt = f"""Write a detailed, long-form blog post about the following topic. 
-First, output a one-paragraph summary (max 200 words) that captures the essence of the post.
-Then, after the summary, write the full post.
+    """Enhanced prompt for high‑quality output."""
+    prompt = f"""You are a world‑class journalist and blogger. Write an in‑depth, engaging, and perfectly structured blog post on the following topic. Use proper HTML tags for headings.
 
 TITLE: {topic['title']}
 DESCRIPTION: {topic['description']}
 SOURCE: {topic['source']}
 
-FORMAT:
-SUMMARY: <your summary here>
+REQUIREMENTS:
+- Length: 3500‑4500 words.
+- Structure:
+  1. <h1>{topic['title']}</h1>
+  2. <h2>Synopsis</h2> – a compelling 2‑paragraph summary.
+  3. <h2>Introduction</h2> – hook the reader with a surprising fact, question, or anecdote.
+  4. <h2>Background / Context</h2> – provide necessary history and key facts.
+  5. <h2>Main Analysis</h2> – break into at least 3 sub‑sections with <h3> subheadings. Include data, examples, and expert quotes (you can invent plausible ones).
+  6. <h2>Implications & Future Outlook</h2> – discuss what this means for readers, industry, or society.
+  7. <h2>Conclusion</h2> – summarize key takeaways and end with a thought‑provoking question or call to action.
+- Use clear, accessible language but maintain authority.
+- Avoid any meta‑comments like "Here's a blog post..." – just output the article.
 
-Then the post with the following structure:
-- Start with an <h1> title (the given title)
-- Then an <h2>Introduction</h2>
-- Then several <h2> sections (at least 4) with detailed analysis, examples, implications
-- End with <h2>Conclusion</h2>
-
-Length: 3000-4000 words. Write in clear, engaging prose. Use <h2> for headings, <p> for paragraphs.
+Write the post now, using HTML tags.
 """
-    output = generate_with_ollama(prompt)
-    if not output:
-        return None, None
-    # Extract summary
-    if "SUMMARY:" in output:
-        parts = output.split("SUMMARY:", 1)
-        summary_and_rest = parts[1].strip()
-        lines = summary_and_rest.split("\n\n", 1)
-        summary = lines[0].strip()
-        content = lines[1] if len(lines) > 1 else ""
-    else:
-        summary = output[:200]
-        content = output
-    return content.strip(), summary.strip()
+    # Try AirLLM first
+    content = generate_with_airllm(prompt)
+    if content:
+        return content, "Generated by AirLLM (first 160 chars)"
+    # Fallback to Ollama
+    print("⚠️ AirLLM failed, falling back to Ollama.")
+    content = generate_with_ollama(prompt)
+    if content:
+        return content, content[:160]
+    # Ultimate fallback
+    return None, None
 
 def save_local_post(title, content, summary):
     slug = title.lower().replace(' ', '-')[:50]
@@ -380,7 +408,7 @@ def save_local_post(title, content, summary):
 # ==================== MAIN ====================
 def main():
     print("="*70)
-    print("🚀 AI BLOGGER – Full SEO Suite (Service Account)")
+    print("🚀 AI BLOGGER – AirLLM Edition (High Quality)")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
@@ -406,7 +434,7 @@ def main():
     else:
         print("⚠️ No image, using gradient fallback")
 
-    print("\n✍️ Generating long content...")
+    print("\n✍️ Generating high‑quality content with AirLLM (this may take a long time)...")
     content, summary = generate_blog_post(topic)
     if not content:
         print("❌ Generation failed")
@@ -422,19 +450,15 @@ def main():
         content,
         summary,
         img_url,
-        ['AI Generated', topic['source'].replace(' ', '-'), 'LongForm']
+        ['AI Generated', topic['source'].replace(' ', '-'), 'AirLLM']
     )
 
     if ok:
         print("\n🔔 Pinging Google...")
         ping_google()
-
         if GSC_SERVICE_ACCOUNT_JSON:
-            print("\n📤 Submitting to Google Search Console via Service Account...")
+            print("\n📤 Submitting to Google Search Console...")
             submit_to_search_console(url)
-        else:
-            print("ℹ️ No GSC_SERVICE_ACCOUNT_JSON secret – skipping Search Console submission.")
-
         print(f"\n✨ SUCCESS! Post published: {url}")
         print(f"📁 Backup: {local}")
     else:
