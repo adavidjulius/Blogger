@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
 """
-Blogger Auto-Poster – AirLLM Edition (13B/7B on CPU) – FINAL FIXED VERSION
-- Auto-detects working sitemap URL for Google ping
-- Improved Search Console error handling
-- Falls back to Ollama (llama3:8b / phi) if AirLLM fails
-- All existing SEO & image features preserved
+Blogger Auto-Poster – Optimized for CPU (1500-2000 words)
+- Uses Ollama with tinyllama for speed, falls back to phi.
+- Increased timeouts, warm‑up prompt, and lower word count.
 """
 
-import os
-import sys
-import requests
-import feedparser
-import random
-import subprocess
-import traceback
-import urllib.parse
-import base64
-import json
-import time
+import os, sys, requests, feedparser, random, subprocess, traceback, urllib.parse, base64, json, time
 from datetime import datetime
 from pathlib import Path
-
-# Google APIs
 from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
-from google.auth.exceptions import RefreshError
-from googleapiclient.errors import HttpError
 
 # AirLLM – optional
 try:
@@ -43,22 +27,22 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 GSC_SERVICE_ACCOUNT_JSON = os.getenv("GSC_SERVICE_ACCOUNT_JSON")
 
-# Model selection – 7B is safer on GitHub runners
-AIRLLM_MODEL = "v2ray/Llama-2-7B"          # 7B – works on CPU with ~6GB RAM
-# AIRLLM_MODEL = "v2ray/Llama-2-13B"        # 13B – may exceed memory, use cautiously
-OLLAMA_PRIMARY = "llama3:8b"
-OLLAMA_FALLBACK = "phi"
+# Model selection – choose smaller models for CPU
+OLLAMA_PRIMARY = "tinyllama"          # 1.1B, very fast
+OLLAMA_SECONDARY = "phi"               # 2.7B, fallback
+OLLAMA_TERTIARY = "llama3:8b"          # 8B, only if needed
+TIMEOUT_SECONDS = 900                   # 15 minutes
 
 LOGO_PATH = Path("logo.png")
 BLOG_URL = "https://readcontext.blogspot.com"
 
-# We'll auto-detect the correct sitemap URL
+# Auto-detect sitemap
 SITEMAP_CANDIDATES = [
     f"{BLOG_URL}/sitemap.xml",
     f"{BLOG_URL}/atom.xml?redirect=false&start-index=1&max-results=500",
     f"{BLOG_URL}/feeds/posts/default",
 ]
-SITEMAP_URL = None  # will be set by test_sitemap()
+SITEMAP_URL = None
 
 # ==================== SETUP ====================
 CACHE_DIR = Path(".blog-cache")
@@ -83,7 +67,6 @@ def log_error(step, error, details=None):
     print(f"   Traceback: {traceback.format_exc()}")
 
 def test_sitemap():
-    """Find a working sitemap URL by trying candidates."""
     global SITEMAP_URL
     for url in SITEMAP_CANDIDATES:
         try:
@@ -94,11 +77,10 @@ def test_sitemap():
                 return
         except:
             continue
-    # Fallback to the first candidate (will be used anyway)
     SITEMAP_URL = SITEMAP_CANDIDATES[0]
     print(f"⚠️ No working sitemap found, using default: {SITEMAP_URL}")
 
-# ==================== IMAGE FETCHING ====================
+# ==================== IMAGE & LOGO (unchanged) ====================
 def extract_rss_image(entry):
     if hasattr(entry, 'media_content') and entry.media_content:
         for m in entry.media_content:
@@ -160,7 +142,6 @@ def create_image_html(img_url, title):
     </div>
     '''
 
-# ==================== LOGO ====================
 def get_logo_base64():
     if not LOGO_PATH.exists():
         return None
@@ -181,7 +162,6 @@ def create_logo_html():
     </div>
     '''
 
-# ==================== INTERNAL LINKING ====================
 def get_related_posts_html(current_title, max_links=3):
     if not posts_log:
         return ""
@@ -195,7 +175,7 @@ def get_related_posts_html(current_title, max_links=3):
     html += '</ul>'
     return html
 
-# ==================== PING GOOGLE ====================
+# ==================== GOOGLE PING & SEARCH CONSOLE ====================
 def ping_google():
     global SITEMAP_URL
     if not SITEMAP_URL:
@@ -206,17 +186,15 @@ def ping_google():
         if r.status_code == 200:
             print("✅ Google pinged successfully")
         else:
-            print(f"⚠️ Google ping returned {r.status_code} – check sitemap URL: {SITEMAP_URL}")
+            print(f"⚠️ Google ping returned {r.status_code}")
     except Exception as e:
         log_error("Google Ping", str(e))
 
-# ==================== SEARCH CONSOLE ====================
 def submit_to_search_console(post_url):
     if not GSC_SERVICE_ACCOUNT_JSON:
         print("⚠️ GSC_SERVICE_ACCOUNT_JSON not set – skipping Search Console submission.")
         return False
     try:
-        # Clean the JSON string (remove any extra quotes)
         json_str = GSC_SERVICE_ACCOUNT_JSON.strip()
         if json_str.startswith('"') and json_str.endswith('"'):
             json_str = json_str[1:-1].replace('\\"', '"')
@@ -242,18 +220,11 @@ def submit_to_search_console(post_url):
             timeout=10
         )
         if resp.status_code == 200:
-            print("✅ Submitted to Google Search Console via Service Account")
+            print("✅ Submitted to Google Search Console")
             return True
         else:
-            error_body = resp.text
-            print(f"⚠️ Search Console API error: {resp.status_code} {error_body}")
-            if resp.status_code == 401:
-                print("   🔑 Ensure the service account email is added as an owner in Search Console.")
+            print(f"⚠️ Search Console API error: {resp.status_code} {resp.text}")
             return False
-    except json.JSONDecodeError as e:
-        log_error("Search Console JSON parse", str(e))
-        print("   🔧 Check that GSC_SERVICE_ACCOUNT_JSON contains the entire JSON key (including braces).")
-        return False
     except Exception as e:
         log_error("Search Console API", str(e))
         return False
@@ -347,37 +318,17 @@ def get_trending_topics():
     random.shuffle(topics)
     return topics
 
-# ==================== AIRLLM GENERATION ====================
-def generate_with_airllm(prompt, model_name=AIRLLM_MODEL):
-    if not AIRLLM_AVAILABLE:
-        return None
+# ==================== GENERATION (OLLAMA ONLY) ====================
+def warm_up_model(model):
+    """Send a tiny prompt to load model into memory."""
     try:
-        print(f"🤖 Loading AirLLM model {model_name}...")
-        model = AutoModel.from_pretrained(model_name, compression='4bit')
-        print("✅ Model loaded.")
-        input_ids = model.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).input_ids
-        if hasattr(model, 'device'):
-            input_ids = input_ids.to(model.device)
-        print("⏳ Generating (this may take a long time on CPU)...")
-        output = model.generate(
-            input_ids,
-            max_new_tokens=4096,
-            use_cache=True,
-            temperature=0.8,
-            do_sample=True,
-            top_p=0.9
-        )
-        result = model.tokenizer.decode(output[0], skip_special_tokens=True)
-        if result.startswith(prompt):
-            result = result[len(prompt):].strip()
-        print(f"✅ AirLLM generation complete ({len(result)} chars)")
-        return result
-    except Exception as e:
-        log_error("AirLLM Generation", str(e))
-        return None
+        requests.post('http://localhost:11434/api/generate',
+                      json={"model": model, "prompt": "Hello", "stream": False},
+                      timeout=30)
+    except:
+        pass
 
-# ==================== OLLAMA GENERATION ====================
-def generate_with_ollama(prompt, model):
+def generate_with_ollama(prompt, model, timeout_sec=TIMEOUT_SECONDS):
     try:
         # Try API first
         resp = requests.post('http://localhost:11434/api/generate',
@@ -385,9 +336,9 @@ def generate_with_ollama(prompt, model):
                                   "model": model,
                                   "prompt": prompt,
                                   "stream": False,
-                                  "options": {"temperature": 0.7, "num_predict": 4096}
+                                  "options": {"temperature": 0.7, "num_predict": 2048}  # ~1500-2000 words
                               },
-                              timeout=600)
+                              timeout=timeout_sec)
         if resp.status_code == 200:
             content = resp.json().get('response', '').strip()
             if content:
@@ -397,7 +348,7 @@ def generate_with_ollama(prompt, model):
     # Fallback to CLI
     try:
         result = subprocess.run(['/usr/local/bin/ollama', 'run', model, prompt],
-                                capture_output=True, text=True, timeout=600)
+                                capture_output=True, text=True, timeout=timeout_sec)
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception as e:
@@ -405,50 +356,45 @@ def generate_with_ollama(prompt, model):
     return None
 
 def generate_blog_post(topic):
-    """Enhanced prompt for high‑quality output."""
-    prompt = f"""You are a world‑class journalist and blogger. Write an in‑depth, engaging, and perfectly structured blog post on the following topic. Use proper HTML tags for headings.
+    """Prompt targeting 1500-2000 words."""
+    prompt = f"""You are a journalist. Write a detailed, well‑structured blog post.
 
 TITLE: {topic['title']}
 DESCRIPTION: {topic['description']}
 SOURCE: {topic['source']}
 
-REQUIREMENTS:
-- Length: 3500‑4500 words.
-- Structure:
-  1. <h1>{topic['title']}</h1>
-  2. <h2>Synopsis</h2> – a compelling 2‑paragraph summary.
-  3. <h2>Introduction</h2> – hook the reader.
-  4. <h2>Background / Context</h2>
-  5. <h2>Main Analysis</h2> – break into at least 3 sub‑sections with <h3> subheadings. Include data, examples, and expert quotes.
-  6. <h2>Implications & Future Outlook</h2>
-  7. <h2>Conclusion</h2>
-- Use clear, accessible language but maintain authority.
-- Avoid any meta‑comments – just output the article.
+STRUCTURE:
+- <h1>{topic['title']}</h1>
+- <h2>Synopsis</h2> – one paragraph summary.
+- <h2>Introduction</h2>
+- <h2>Analysis</h2> – 2-3 paragraphs.
+- <h2>Implications</h2>
+- <h2>Conclusion</h2>
 
-Write the post now, using HTML tags.
+Length: 1500-2000 words. Use <h2> headings, <p> paragraphs. No meta‑comments.
+
+Write the post now:
 """
-    # Try AirLLM first (if installed)
-    if AIRLLM_AVAILABLE:
-        content = generate_with_airllm(prompt)
-        if content:
-            return content, "Generated by AirLLM"
-        else:
-            print("⚠️ AirLLM failed, falling back to Ollama.")
-    else:
-        print("ℹ️ AirLLM not installed, using Ollama.")
+    # Warm up tinyllama (fastest) to load it
+    warm_up_model(OLLAMA_PRIMARY)
 
-    # Try Ollama primary model
+    # Try primary
     content = generate_with_ollama(prompt, OLLAMA_PRIMARY)
     if content:
         return content, f"Generated by {OLLAMA_PRIMARY}"
 
-    # Try Ollama fallback
-    print(f"⚠️ {OLLAMA_PRIMARY} failed, falling back to {OLLAMA_FALLBACK}.")
-    content = generate_with_ollama(prompt, OLLAMA_FALLBACK)
+    # Try secondary
+    print(f"⚠️ {OLLAMA_PRIMARY} failed, falling back to {OLLAMA_SECONDARY}.")
+    content = generate_with_ollama(prompt, OLLAMA_SECONDARY)
     if content:
-        return content, f"Generated by {OLLAMA_FALLBACK}"
+        return content, f"Generated by {OLLAMA_SECONDARY}"
 
-    # Ultimate fallback
+    # Try tertiary
+    print(f"⚠️ {OLLAMA_SECONDARY} failed, falling back to {OLLAMA_TERTIARY}.")
+    content = generate_with_ollama(prompt, OLLAMA_TERTIARY)
+    if content:
+        return content, f"Generated by {OLLAMA_TERTIARY}"
+
     return None, None
 
 def save_local_post(title, content, summary):
@@ -461,11 +407,9 @@ def save_local_post(title, content, summary):
 
 # ==================== MAIN ====================
 def main():
-    # Find working sitemap URL at start
     test_sitemap()
-
     print("="*70)
-    print("🚀 AI BLOGGER – AirLLM Edition (13B/7B on CPU) – FINAL FIXED")
+    print("🚀 AI BLOGGER – CPU Optimized (1500‑2000 words)")
     print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
@@ -491,7 +435,7 @@ def main():
     else:
         print("⚠️ No image, using gradient fallback")
 
-    print("\n✍️ Generating high‑quality content (this may take a long time)...")
+    print("\n✍️ Generating content (1500‑2000 words, ~5‑10 minutes)...")
     content, summary = generate_blog_post(topic)
     if not content:
         print("❌ Generation failed")
@@ -507,7 +451,7 @@ def main():
         content,
         summary,
         img_url,
-        ['AI Generated', topic['source'].replace(' ', '-'), 'AirLLM']
+        ['AI Generated', topic['source'].replace(' ', '-'), 'Optimized']
     )
 
     if ok:
