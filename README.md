@@ -17,6 +17,7 @@ Google sitemap ping after each post.
 Optional Google Search Console submission via Indexing API.
 Local backups: Every generated post is saved as a Markdown file and uploaded as a GitHub Actions artifact.
 Fully configurable: Modify prompts, post length, models, and schedules easily.
+
 📋 Prerequisites
 
 Before you begin, make sure you have:
@@ -27,13 +28,14 @@ Your Blogger Blog ID (found in Settings → Basic → Blog ID).
 Google Cloud Project with Blogger API enabled and OAuth 2.0 credentials (see setup guide).
 (Optional) Google Search Console service account for automatic indexing (see guide).
 A logo image (PNG format) if you want branding.
+
 🚀 Quick Start
 
 1. Fork or Clone This Repository
 
 bash
-git clone https://github.com/your-username/your-repo-name.git
-cd your-repo-name
+git clone https://github.com/adavidjulius/Automatic-Blogger-Poster.git
+cd Automatic-Blogger-Poster
 2. Add Required Files to Your Repository
 
 Place your logo as logo.png in the root folder.
@@ -76,6 +78,7 @@ Pings Google with the sitemap URL.
 (Optional) Submits the new URL to Google Search Console.
 Saves a local backup in the _posts/ folder.
 The post is also uploaded as a GitHub Actions artifact for safekeeping.
+
 🎨 Customization
 
 Changing Post Length
@@ -104,6 +107,7 @@ Modify the cron lines in .github/workflows/daily-blog.yml. The current schedule 
 0 13 * * * → 13:00 UTC
 30 16 * * * → 16:30 UTC
 0 19 * * * → 19:00 UTC
+
 🔑 Setting Up Google OAuth 2.0 for Blogger
 
 Go to the Google Cloud Console.
@@ -130,6 +134,7 @@ In the Google Cloud Console, enable the Indexing API.
 Create a service account (IAM & Admin → Service Accounts) and download its JSON key.
 Add the service account email as an owner in your Search Console property (Settings → Users and permissions).
 Add the entire JSON key as the GitHub secret GSC_SERVICE_ACCOUNT_JSON.
+
 🐛 Troubleshooting
 
 Issue	Solution
@@ -138,6 +143,7 @@ Model generation times out	Increase TIMEOUT_SECONDS in the script, or use a smal
 Google ping returns 404	The sitemap URL may be incorrect. The script auto‑detects the correct one, but you can manually set SITEMAP_URL in the script.
 Search Console API returns 401	Verify that the service account email is added as an owner in Search Console and that the JSON secret is correctly pasted.
 AirLLM not installed	The workflow installs AirLLM; check the "Install Python dependencies" step logs for errors. If it fails, the script falls back to Ollama.
+
 📄 License
 
 This project is open source and available under the MIT License.
